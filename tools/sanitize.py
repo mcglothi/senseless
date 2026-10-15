@@ -1,6 +1,6 @@
 """Strip account-identifying values from a realtime capture so it can be shared.
 
-    python tools/sanitize.py IN.jsonl OUT.jsonl [--from HH:MM:SS --to HH:MM:SS]
+    python tools/sanitize.py IN.jsonl[.gz] OUT.jsonl [--from HH:MM:SS --to HH:MM:SS]
 
 IDs (monitor/user/device/guid) are replaced with stable placeholders, so
 relationships inside the file survive. Power, voltage, frame and timing data
@@ -8,6 +8,7 @@ are kept: that is the point of sharing. Review the output before publishing.
 """
 
 import argparse
+import gzip
 import hashlib
 import json
 from datetime import datetime
@@ -48,9 +49,15 @@ def main() -> None:
     ap.add_argument("--to", dest="end")
     a = ap.parse_args()
     n = 0
-    with open(a.src) as f, open(a.dst, "w") as g:
+    opener = gzip.open if a.src.endswith(".gz") else open
+    with opener(a.src, "rt") as f, open(a.dst, "w") as g:
         for line in f:
             r = json.loads(line)
+            if "raw" in r:  # collector archive format keeps the original text
+                try:
+                    r["msg"] = json.loads(r.pop("raw"))
+                except ValueError:
+                    continue
             hms = datetime.fromtimestamp(r["t"]).strftime("%H:%M:%S")
             keep_always = r["msg"].get("type") != "realtime_update"
             if not keep_always and ((a.start and hms < a.start) or (a.end and hms > a.end)):

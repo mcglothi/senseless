@@ -43,7 +43,7 @@ Check for pinning: grep for `CertificatePinner` outside `okhttp3/`, `sha256/` pi
 
 ## 3. Confirm against the live feed
 
-`senseless collect` does this (raw messages go to `data/raw/rt-YYYY-MM-DD.jsonl.gz`): authenticate,
+`senseless collect` does this (raw messages go to `data/raw/rt-YYYY-MM-DD.jsonl.gz`, one `{"t": recv_time, "raw": "<original text>"}` per line): authenticate,
 open the WebSocket, dump every message to JSONL with a receive timestamp. Then:
 
 1. Look at message types and field shapes.

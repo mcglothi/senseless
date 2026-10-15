@@ -20,6 +20,7 @@ HEADERS = {
     "X-Sense-Protocol": "13",
     "X-Sense-Client-Type": "android",
 }
+# Docker image sets this to /data/token.json so it lives on the persistent volume.
 TOKEN_CACHE = Path(os.environ.get("SENSELESS_TOKEN_CACHE", "~/.config/senseless/token.json")).expanduser()
 
 
@@ -53,6 +54,8 @@ def _credentials() -> tuple[str, str]:
 def login() -> Session:
     email, pw = _credentials()
     r = requests.post(f"{API}/authenticate", data={"email": email, "password": pw}, headers=HEADERS, timeout=20)
+    if r.status_code in (401, 403):
+        raise AuthError(f"credentials rejected: HTTP {r.status_code}")
     if r.status_code != 200:
         raise AuthError(f"authenticate failed: HTTP {r.status_code}")
     a = r.json()
@@ -61,8 +64,12 @@ def login() -> Session:
         raise AuthError("authenticate returned no access_token (MFA enabled?)")
     s = Session(a["access_token"], a["user_id"], a["monitors"][0]["id"])
     TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_CACHE.touch(mode=0o600, exist_ok=True)
-    TOKEN_CACHE.write_text(json.dumps(s.__dict__))
+    tmp = TOKEN_CACHE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(s.__dict__))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, TOKEN_CACHE)
     return s
 
 

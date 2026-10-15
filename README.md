@@ -31,14 +31,29 @@ Read [`notes/`](notes/) for the full protocol write-up.
 
 Early. Today it has:
 
-- `senseless collect`: long-running collector, WebSocket → SQLite + daily raw `jsonl.gz` archive, auto-reconnect
-- `senseless deltas`: show recent step events
+- `senseless collect`: long-running collector, WebSocket → SQLite + daily raw `jsonl.gz` archive. Built to run
+  unattended: stale-feed watchdog, re-auth on 401/403, malformed messages skipped, frame-counter reset handling,
+  clean SIGTERM shutdown, raw archive retention.
+- Built-in HTTP server (port 8780): status page at `/`, Prometheus `/metrics`, `/healthz`, JSON `/api/status`,
+  `/api/deltas?minutes=N`, `/api/readings?minutes=N`
+- `senseless deltas`: show recent step events in the terminal
 - `tools/sanitize.py`: strip account IDs from captures so you can share them
+- Docker image: `ghcr.io/mcglothi/senseless`
 
 Next: pairing on/off steps into events, clustering them into loads, and a labeling loop.
 See [notes/open-questions.md](notes/open-questions.md).
 
 ## Quick start
+
+Docker:
+
+```bash
+cp docker-compose.example.yml docker-compose.yml
+printf 'SENSE_EMAIL=you@example.com\nSENSE_PASSWORD=...\n' > .env && chmod 600 .env
+docker compose up -d        # then open http://localhost:8780
+```
+
+From source:
 
 ```bash
 uv sync
@@ -54,6 +69,12 @@ Query the DB directly:
 ```bash
 sqlite3 data/senseless.db "select datetime(ts,'unixepoch','localtime'), channel, round(w) from deltas order by start_frame desc limit 20"
 ```
+
+Settings (env): `SENSELESS_HTTP_PORT` (8780), `SENSELESS_FEED_STALE_S` (60), `SENSELESS_EXIT_AFTER_S` (900),
+`SENSELESS_RAW_RETENTION_DAYS` (90), `SENSELESS_READINGS_RETENTION_DAYS` (0 = forever).
+
+> The HTTP server has no authentication. It shows household power usage, which reveals when people are home.
+> Keep it on your LAN or put it behind an authenticating reverse proxy.
 
 Tables: `readings` (one row per realtime update), `deltas` (step events), `device_power` (Sense's own
 per-device attribution, written on change), `events` (everything else: timeline, device states, …).

@@ -1,0 +1,12 @@
+# Copy to docker-compose.yml, create .env with SENSE_EMAIL / SENSE_PASSWORD, then: docker compose up -d
+services:
+  senseless:
+    image: ghcr.io/mcglothi/senseless:0.1.0
+    container_name: senseless
+    restart: unless-stopped
+    env_file: .env
+    # user: "1000:1000"          # match the owner of ./data on your host
+    ports:
+      - "8780:8780"              # status page, /metrics, /api
+    volumes:
+      - ./data:/data
