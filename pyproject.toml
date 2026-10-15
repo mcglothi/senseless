@@ -1,0 +1,13 @@
+[project]
+name = "senseless"
+version = "0.1.0"
+description = "Local-first replacement for the Sense energy monitor app: own the data, do our own detection."
+requires-python = ">=3.12"
+dependencies = ["websockets>=14", "requests>=2.31"]
+
+[project.scripts]
+senseless = "senseless.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

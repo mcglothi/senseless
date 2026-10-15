@@ -1,0 +1,4 @@
+data/
+captures/
+.venv/
+__pycache__/
