@@ -98,3 +98,19 @@ From 5 minutes of feed in one house:
   histories, sparse histories and named patterns. Removing the new recompute call makes the
   synthetic four-hour repeater regression fail. Sparse/broad histories still allow some long
   closures; no raw account captures were added to the repository.
+
+
+## 2026-10-16: Provider backend preserves the CMP model
+
+- **Verified by synthetic tests, not new utility traffic:** pricing now runs through a validated CMP
+  JSON pack, retaining $157.13 at 550 kWh and $362.71 at 1,350 kWh. All prices in the compatibility
+  catalog derive from the pack. The Electric Technology expiry is recorded as 2027-01-31.
+- Interval imports and analysis use `usage_interval` in settings.db. Migration preserves old meter
+  rows without overwriting corrections; finer observations replace overlapping portions of coarser
+  ones, and incomplete hours do not count as complete days. Synthetic DST/overlap cases cover this.
+- Green Button XML, CSV profiles, saved mappings, CMP bill parsing, normalized lines, preview and
+  tariff/mapping endpoints are implemented. Synthetic identity sentinels are absent from persisted
+  data, responses and errors. No household captures were added.
+- **Still unverified:** Smart Meter Texas and Green Button CSV against real exports. Local timestamps
+  during DST gaps/repeated hours need explicit offsets. No jurisdiction-specific holiday calendar is
+  inferred. The engine honors explicit holiday flags; CMP keeps its prior holiday approximation.

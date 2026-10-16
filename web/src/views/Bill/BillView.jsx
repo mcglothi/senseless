@@ -3,7 +3,9 @@ import { C, MONO, alpha, useTheme } from '../../ui/theme'
 import { toast } from '../../ui/primitives'
 import { api } from '../../api/api'
 import { fmtInt } from '../../ui/format'
-import { breakdown, cycleBars, touAdvice, usd } from '../../ui/billing'
+import { breakdown, cycleBars, describeComponents, touAdvice, usd } from '../../ui/billing'
+import { BillImport } from './BillImport'
+import { BillInsights } from './BillInsights'
 
 // Bill: this billing cycle priced the way the utility bills it (fixed charge, delivery, supply, tax),
 // projected to the end of the cycle, compared across rate plans, and checked against bills you enter.
@@ -11,13 +13,14 @@ import { breakdown, cycleBars, touAdvice, usd } from '../../ui/billing'
 const PART_COLOR = { fixed: () => C.muted, delivery: () => C.l1, supply: () => C.accent, tax: () => C.orange }
 
 function useBilling() {
-  const [state, setState] = useState({ config: null, cycle: null, bills: [], error: null, loading: true })
+  const [state, setState] = useState({ config: null, cycle: null, bills: [], insights: null, error: null, loading: true })
   const load = useCallback(async () => {
     try {
       const [config, bills] = await Promise.all([api('GET', '/api/billing'), api('GET', '/api/billing/bills')])
-      setState(s => ({ ...s, config, bills, loading: false }))
-      const cycle = await api('GET', '/api/billing/cycle')
-      setState(s => ({ ...s, cycle, error: null }))
+      const pack = await api('GET', `/api/billing/tariffs/${config.settings.pack}`).catch(() => null)
+      setState(s => ({ ...s, config, bills, pack, loading: false }))
+      const [cycle, insights] = await Promise.all([api('GET', '/api/billing/cycle'), api('GET', '/api/billing/insights').catch(() => null)])
+      setState(s => ({ ...s, cycle, insights, error: null }))
     } catch (e) {
       setState(s => ({ ...s, error: e.message, loading: false }))
     }
@@ -86,7 +89,7 @@ export function BillView() {
         </div>
       )}
 
-      {c && (
+      {c && !b.insights?.plans_12mo && (
         <section style={card} aria-label="Rate plans">
           <div style={kicker}>Your usage on each rate plan</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : `repeat(${c.compare.length}, minmax(0, 1fr))`, gap: 10 }}>
@@ -113,6 +116,13 @@ export function BillView() {
           {tou && <p style={{ color: C.body, fontSize: 14, lineHeight: 1.5 }}>{tou.text} Measured over the last {c.on_peak_days} days; switching may need a meter exchange, and supply is priced the same either way.</p>}
         </section>
       )}
+
+      <BillInsights insights={b.insights} currentPlan={b.config?.settings.plan} labelOf={id => b.pack?.plans.find(p => p.id === id)?.label ?? id} />
+
+      <section style={card} aria-label="Import bills and usage">
+        <div style={kicker}>Import</div>
+        <BillImport onImported={b.reload} />
+      </section>
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) minmax(0, 1fr)', gap: sp(14) }}>
         <Bills b={b} />
@@ -166,7 +176,7 @@ function DailyBars({ cycle }) {
 
 function Bills({ b }) {
   const [form, setForm] = useState({ start: '', end: '', kwh: '', amount: '', on: '' })
-  const tou = !!b.config?.plans[b.config.settings.plan]?.tou
+  const tou = !!b.pack?.plans.find(p => p.id === b.config?.settings.plan)?.components?.some(c => c.type === 'tou')
   const submit = async e => {
     e.preventDefault()
     try {
@@ -181,13 +191,15 @@ function Bills({ b }) {
     <section style={card} aria-label="Your bills">
       <div style={kicker}>Your bills</div>
       <p style={small}>Enter a few real bills to see how close the estimate is. With "match my bills" on, projections are scaled by the average difference.</p>
-      {b.bills.map(x => (
+      {b.bills.map(x => ({ ...x, own: b.insights?.bills?.find(i => i.start === x.start && i.end === x.end)?.check })).map(x => (
         <div key={x.id} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 10, alignItems: 'center', fontFamily: MONO, fontSize: 12,
           borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
           <span style={{ color: C.body }}>{fmtDate(x.start)} → {fmtDate(x.end)} · {fmtInt(x.kwh)} kWh</span>
-          <span style={{ color: C.bright }}>{usd(x.amount)} {x.estimate == null
-            ? <span style={{ color: C.dim }}>(add its on-peak kWh to compare)</span>
-            : <span style={{ color: Math.abs(x.ratio - 1) < 0.05 ? C.green : C.amber }}>(est. {usd(x.estimate)}, {x.diff >= 0 ? '+' : ''}{usd(x.diff)})</span>}</span>
+          <span style={{ color: C.bright }}>{usd(x.amount)} {x.own
+            ? <span style={{ color: Math.abs(x.own.diff) <= 0.05 ? C.green : C.amber }} title="Recomputed from the rates printed on this bill">(model {usd(x.own.model_total)}{Math.abs(x.own.diff) <= 0.05 ? ' ✓' : `, ${x.own.diff >= 0 ? '+' : ''}${usd(x.own.diff)}`})</span>
+            : x.estimate == null
+              ? <span style={{ color: C.dim }}>(add its on-peak kWh to compare)</span>
+              : <span style={{ color: Math.abs(x.ratio - 1) < 0.05 ? C.green : C.amber }} title="Estimated with today's tariff">(est. {usd(x.estimate)}, {x.diff >= 0 ? '+' : ''}{usd(x.diff)})</span>}</span>
           <button type="button" aria-label={`Remove bill ${x.start}`} onClick={() => b.removeBill(x.id).catch(e => toast(e.message))}
             style={{ width: 32, height: 32, borderRadius: 8, cursor: 'pointer', background: 'transparent', color: C.dim, border: `1px solid ${C.line2}` }}>×</button>
         </div>
@@ -206,7 +218,12 @@ function Bills({ b }) {
 
 function Settings({ config, save }) {
   const s = config.settings
-  const plan = config.plans[s.plan]
+  const [packs, setPacks] = useState([])
+  const [pack, setPack] = useState(null)
+  useEffect(() => { api('GET', '/api/billing/tariffs').then(setPacks).catch(() => {}) }, [])
+  useEffect(() => { if (s.pack) api('GET', `/api/billing/tariffs/${s.pack}`).then(setPack).catch(() => setPack(null)) }, [s.pack])
+  const plan = pack?.plans.find(p => p.id === s.plan) ?? (s.plan === 'custom' ? { label: 'Custom', components: [], source: 'entered by you' } : null)
+  const supply = pack?.supply?.find(p => p.id === s.supply)
   const [draft, setDraft] = useState(null)
   const num = (k, scale = 1) => (draft?.[k] ?? String(Number((s[k] * scale).toFixed(6))))   // 0.12721*100 is 12.720999…
   const commit = (k, scale = 1) => {
@@ -218,26 +235,40 @@ function Settings({ config, save }) {
     if (Number.isFinite(v) && v !== s[k]) save({ [k]: k === 'billing_day' || k === 'tax_exempt_kwh' ? Math.round(v) : v })
   }
   const edit = k => e => setDraft(d => ({ ...d, [k]: e.target.value }))
+  // a bundled plan includes its own supply; any other plan needs one, so restore the pack's default
+  const choosePlan = id => {
+    const next = pack?.plans.find(p => p.id === id)
+    save(next?.kind === 'bundled' ? { plan: id, supply: null } : { plan: id, supply: s.supply ?? pack?.supply?.[0]?.id ?? null })
+  }
+  const choosePack = async id => {
+    const p = await api('GET', `/api/billing/tariffs/${id}`).catch(() => null)
+    if (!p) return
+    save({ pack: id, plan: p.plans[0]?.id, supply: p.supply?.[0]?.id ?? null })
+  }
   return (
     <section style={card} aria-label="Tariff settings">
       <div style={kicker}>Tariff</div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
-        <Field label="Delivery plan">
-          <select value={s.plan} onChange={e => save({ plan: e.target.value })} style={input}>
-            {Object.entries(config.plans).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10 }}>
+        <Field label="Utility">
+          <select value={s.pack} onChange={e => choosePack(e.target.value)} style={input}>
+            {packs.map(p => <option key={p.id} value={p.id}>{p.utility}{p.region ? ` (${p.region})` : ''}</option>)}
           </select>
         </Field>
-        <Field label="Supply ¢/kWh">
-          <input type="number" step="0.001" inputMode="decimal" value={num('supply_per_kwh', 100)} onChange={edit('supply_per_kwh')} onBlur={() => commit('supply_per_kwh', 100)} style={input} />
+        <Field label="Delivery plan">
+          <select value={s.plan} onChange={e => choosePlan(e.target.value)} style={input} disabled={!pack}>
+            {(pack?.plans ?? []).map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            <option value="custom">Custom (enter your own rates)</option>
+          </select>
         </Field>
+        {(pack?.supply?.length ?? 0) > 0 && (
+          <Field label="Supply">
+            <select value={s.supply ?? ''} onChange={e => save({ supply: e.target.value || null })} style={input}>
+              {pack.supply.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Cycle starts on day">
           <input type="number" min="1" max="31" inputMode="numeric" value={num('billing_day')} onChange={edit('billing_day')} onBlur={() => commit('billing_day')} style={input} />
-        </Field>
-        <Field label="Sales tax %">
-          <input type="number" step="0.1" inputMode="decimal" value={num('tax_rate', 100)} onChange={edit('tax_rate')} onBlur={() => commit('tax_rate', 100)} style={input} />
-        </Field>
-        <Field label="Tax-free kWh / month">
-          <input type="number" min="0" inputMode="numeric" value={num('tax_exempt_kwh')} onChange={edit('tax_exempt_kwh')} onBlur={() => commit('tax_exempt_kwh')} style={input} />
         </Field>
         <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontFamily: MONO, fontSize: 12, color: C.body, cursor: 'pointer' }}>
           <input type="checkbox" checked={s.calibrate} onChange={e => save({ calibrate: e.target.checked })} style={{ width: 18, height: 18, accentColor: C.accent }} />
@@ -245,14 +276,15 @@ function Settings({ config, save }) {
         </label>
       </div>
       {s.plan === 'custom' && <CustomPlan s={s} save={save} />}
-      <div style={small}>
-        {plan.tou
-          ? <>Delivery {usd(plan.fixed)}/month + {(plan.tou.on * 100).toFixed(2)}¢ on-peak ({plan.tou.start_hour}–{plan.tou.end_hour}h weekdays) / {(plan.tou.off * 100).toFixed(2)}¢ off-peak.</>
-          : <>Delivery {usd(plan.fixed)}/month{plan.fixed_kwh ? ` (includes the first ${plan.fixed_kwh} kWh)` : ''} + {((plan.delivery ?? 0) * 100).toFixed(4)}¢/kWh.</>}
-        {' '}Supply {(s.supply_per_kwh * 100).toFixed(3)}¢/kWh ({s.supplier}).
-        <br />Source: {plan.source}{plan.effective ? `, effective ${plan.effective}` : ''}. Supply: {config.supply.source}.
-        Find your cycle start (meter-read date) on your bill.
-      </div>
+      {plan && (
+        <div style={small}>
+          {describeComponents(plan.components)}{supply ? ` Supply: ${describeComponents(supply.components)}` : ''}
+          {(pack?.taxes ?? []).map(t => ` ${t.label ?? 'Tax'} ${(t.rate * 100).toFixed(1)}%${t.exempt_kwh ? ` above ${fmtInt(t.exempt_kwh)} kWh/month` : ''}.`).join('')}
+          <br />Source: {plan.source}{plan.effective ? `, effective ${plan.effective}` : ''}{plan.expires ? `; expires ${plan.expires}` : ''}.
+          {supply ? ` Supply: ${supply.source}.` : ''} Your cycle start is the meter-read date on your bill.
+        </div>
+      )}
+      <div style={small}>Another utility? Its plans are a small data file (a tariff pack): see notes/energy-providers.md, or POST one to /api/billing/tariffs.</div>
     </section>
   )
 }

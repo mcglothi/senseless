@@ -88,14 +88,14 @@ def test_cycle_projection_and_compare(tmp_path):
     # weekdays are 8/40 on-peak, weekends 0: the 7 most recent complete days include 2 weekend days
     assert c["on_peak_share"] == pytest.approx((5 * 8) / (7 * 40), abs=0.001)
     plans = {x["plan"]: x for x in c["compare"]}
-    assert set(plans) == {"cmp-a", "cmp-a-tou", "cmp-et"} and plans["cmp-a"]["delta"] == 0
+    assert set(plans) == {"rate-a", "a-tou", "electric-technology"} and plans["rate-a"]["delta"] == 0
     b.update({"billing_day": 20})
     assert b.cycle()["start"] == "2026-09-20"
 
 
 def test_settings_validation(tmp_path):
     b = Billing(tmp_path / "s.db")
-    assert b.settings()["plan"] == "cmp-a"
+    assert b.settings()["plan"] == "rate-a"
     for bad in ({"plan": "x"}, {"billing_day": 32}, {"billing_day": 1.5}, {"tax_rate": -1}, {"supply_per_kwh": "1"},
                 {"calibrate": 1}, {"nope": 1}, {"custom": {"fixed": -1}}, {"custom": {"other": 1}}, {"supplier": ""}):
         with pytest.raises(BillingError):
@@ -130,7 +130,7 @@ def test_billing_api(tmp_path):
         app = web.make_app(LiveState(), tmp_path / "t.db", billing=bill)
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/billing")).json()
-            assert body["settings"]["plan"] == "cmp-a" and "cmp-a-tou" in body["plans"] and body["rates"]["marginal_cents_per_kwh"] > 24
+            assert body["settings"]["plan"] == "rate-a" and "cmp-a-tou" in body["plans"] and body["rates"]["marginal_cents_per_kwh"] > 24
             assert (await c.post("/api/billing", json={"billing_day": 40})).status == 400
             assert (await c.post("/api/billing", json={"billing_day": 12}, headers={"Origin": "http://evil.example"})).status == 403
             assert (await (await c.post("/api/billing", json={"billing_day": 12})).json())["billing_day"] == 12

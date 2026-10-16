@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { breakdown, cycleBars, touAdvice, usd } from './billing'
+import { breakdown, cycleBars, describeComponents, touAdvice, usd } from './billing'
 
 describe('bill helpers', () => {
   it('formats dollars', () => {
@@ -28,5 +28,12 @@ describe('bill helpers', () => {
     expect(a.text).toContain('$25.65')
     expect(touAdvice({ on_peak_share: 0.3, compare: [{ plan: 'cmp-a-tou', delta: 12 }] }).saves).toBe(false)
     expect(touAdvice({ on_peak_share: null, compare: [] })).toBe(null)
+  })
+  it('describes tariff components in plain words', () => {
+    expect(describeComponents([{ type: 'fixed', per: 'month', amount: 27.37, includes_kwh: 50 }, { type: 'energy', rate: 0.11959 }]))
+      .toBe('$27.37/month (includes 50 kWh) + 11.96¢/kWh.')
+    expect(describeComponents([{ type: 'tou', periods: [{ name: 'on-peak', rate: 0.428836, weekdays: [0, 1, 2, 3, 4], hours: [17, 21] }], default_rate: 0.06147 }]))
+      .toBe('42.88¢ on-peak (5 pm–9 pm weekdays), 6.147¢ other hours.')
+    expect(describeComponents([{ type: 'credit', min_kwh: 1000, amount: -100 }])).toBe('$100.00 credit at 1000+ kWh.')
   })
 })

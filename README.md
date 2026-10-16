@@ -67,12 +67,14 @@ Browse days, months, and years from Sense's cloud history, cached locally. Drill
 
 ### Bill
 
-Sense prices every kWh at one flat rate, which in Maine leaves out the delivery half of the bill. The Bill view prices your usage the way the utility bills it: a fixed monthly charge, delivery per kWh (flat or time-of-use), supply per kWh, and sales tax above the exempt amount. It projects the current billing cycle from Sense's daily history, shows the split, and says what each extra kWh costs. It also prices the same usage on every rate plan, so you can see whether time-of-use or another rate would be cheaper for how you actually use power. Enter real bills to check the estimate, and optionally scale projections to match them.
+Sense prices every kWh at one flat rate, which in Maine leaves out the delivery half of the bill. The Bill view prices your usage the way your utility bills it: fixed charges, delivery (flat, tiered or time-of-use), supply, credits, minimums and sales tax. It projects the current billing cycle, shows the split, and says what each extra kWh really costs.
+
+**Import your utility data.** Drop bill PDFs and usage exports onto the page: Green Button XML or CSV (offered by most US utilities as "Download My Data"), Smart Meter Texas (every Texas retail provider), Avangrid hourly CSVs (CMP and sister utilities), or any other usage CSV after a one-time column mapping. Names, addresses and account numbers are dropped on import. With a year of meter data, Senseless prices the last 12 months on every plan your utility offers (with each month's real hours, so time-of-use reflects winter evenings), projects the cycle from last year's season, plots usage against outdoor temperature, checks every bill against its own printed rates, and tells you how closely Sense matches the meter you're billed on.
 
 ![Bill view: projected bill split into fixed, delivery, supply and tax, daily use, and rate plans compared](docs/screenshots/bill.jpg)
 *This cycle priced by the tariff, next to what each rate plan would cost for the same usage.*
 
-Central Maine Power's published residential tariffs (Rate A, time-of-use, Electric Technology) and the Maine Standard Offer supply price are built in, with their sources and effective dates; a custom plan covers other utilities. The Now view's cost-so-far and the always-on $/year use the same tariff.
+**Any utility.** Tariffs are data files ("tariff packs"), not code: Central Maine Power's residential rates and the Maine Standard Offer ship built in, with sources and effective dates, and adding another utility is a small JSON file ([how](notes/energy-providers.md)). Bill parsers are small in-repo plugins (CMP first). The Now view's cost-so-far and the always-on $/year use the same tariff.
 
 ### Theming and appearance
 
@@ -185,7 +187,7 @@ Your data directory contains:
 | Path | Contents |
 |---|---|
 | `senseless.db` | Realtime readings, on-board deltas, Sense's device power attribution on change, and other feed events. |
-| `settings.db` | Persistent patterns and names, breaker map, the property map (buildings, floors, rooms, markers), billing settings and entered bills, appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
+| `settings.db` | Persistent patterns and names, breaker map, the property map (buildings, floors, rooms, markers), billing settings, entered/imported bills and hourly meter data (without personal information), appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
 | `floorplans/` | Uploaded site and floor plan images. |
 | `raw/rt-YYYY-MM-DD.jsonl.gz` | Daily compressed archives of every feed message, enabled by default. |
 | `themes-gallery.json` | Cached theme gallery. |

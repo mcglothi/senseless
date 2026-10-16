@@ -12,7 +12,7 @@ from aiohttp import web
 
 from . import summary
 from .appearance import Appearance, AppearanceError
-from .billing import Billing, BillingError
+from .billing import Billing, BillingError, MAX_IMPORT_BYTES
 from .circuits import CircuitError, Circuits
 from .floorplans import FloorplanError, Floorplans, IMAGE_TYPES, MAX_IMAGE_BYTES
 from .history import History, HistoryError
@@ -36,8 +36,18 @@ API_INDEX = [
     {"method": "GET", "path": "/api/runs?minutes=", "does": "individual on/off runs for the timeline"},
     {"method": "GET", "path": "/api/history?scale=day|week|month|year&date=", "does": "Sense cloud history and per-device breakdown"},
     {"method": "GET", "path": "/api/billing", "does": "tariff settings, available rate plans (with sources), current marginal rate"},
-    {"method": "POST", "path": "/api/billing", "body": {"plan": "cmp-a|cmp-a-tou|cmp-et|custom", "supply_per_kwh": "num", "billing_day": "1-31", "tax_rate": "num", "tax_exempt_kwh": "num", "calibrate": "bool"}, "does": "change tariff settings"},
+    {"method": "POST", "path": "/api/billing", "body": {"pack": "tariff pack id", "plan": "plan id (legacy cmp-* accepted)", "supply": "supply id or null", "supply_per_kwh": "num", "billing_day": "1-31", "tax_rate": "num", "tax_exempt_kwh": "num", "calibrate": "bool"}, "does": "change tariff settings"},
     {"method": "GET", "path": "/api/billing/cycle", "does": "this billing cycle: kWh so far, projected bill with fixed/delivery/supply/tax, other plans compared"},
+    {"method": "PUT", "path": "/api/billing/import", "does": "import interval usage (Green Button XML/CSV, SMT, saved mappings) or CMP bill (raw body, X-Senseless-Upload: 1, maximum 20 MiB); discard personal data"},
+    {"method": "POST", "path": "/api/billing/import/preview", "does": "preview normalized usage/bill without saving; same upload guards"},
+    {"method": "GET", "path": "/api/billing/csv-profiles", "does": "list saved CSV mappings"},
+    {"method": "POST", "path": "/api/billing/csv-profiles", "does": "validate and save a CSV column mapping"},
+    {"method": "DELETE", "path": "/api/billing/csv-profiles", "does": "delete a saved CSV mapping (?name=slug)"},
+    {"method": "GET", "path": "/api/billing/tariffs", "does": "list built-in and user tariff pack summaries"},
+    {"method": "GET", "path": "/api/billing/tariffs/{pack}", "does": "read a complete tariff pack"},
+    {"method": "POST", "path": "/api/billing/tariffs", "does": "validate and add/replace a user tariff pack; built-in ids are read-only"},
+    {"method": "DELETE", "path": "/api/billing/tariffs/{pack}", "does": "delete an unselected user tariff pack"},
+    {"method": "GET", "path": "/api/billing/insights", "does": "meter coverage, Sense accuracy, 12-month plan comparison, weather bins and historical bill checks"},
     {"method": "GET", "path": "/api/billing/estimate?kwh=&on_peak_kwh=&plan=&months=", "does": "what a bill for that usage would be"},
     {"method": "GET", "path": "/api/billing/bills", "does": "bills you entered, each with the model's estimate and the difference"},
     {"method": "POST", "path": "/api/billing/bills", "body": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "kwh": "num", "amount": "num"}, "does": "enter a real bill to check the estimates"},
@@ -616,10 +626,9 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         return billing
 
     async def billing_get(_):
-        from .billing import PLANS, SUPPLY
         b = _bill()
         return web.json_response({"settings": await asyncio.to_thread(b.settings), "rates": await asyncio.to_thread(b.rates),
-                                  "plans": PLANS, "supply": SUPPLY})
+                                  "plans": await asyncio.to_thread(b.plans), "supply": await asyncio.to_thread(b.supply_info)})
 
     async def billing_post(req):
         try:
@@ -632,11 +641,90 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             return web.json_response(await asyncio.to_thread(_bill().cycle))
         except BillingError as e:
             return _bad(e)
-        except HistoryError as e:
-            return web.json_response({"error": f"Sense history unavailable: {e}"}, status=502)
+        except HistoryError:
+            return web.json_response({"error": "Sense history unavailable"}, status=502)
+
+    async def billing_upload(req, preview=False):
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        try:
+            b = _bill()
+            if req.headers.get("X-Senseless-Upload") != "1":
+                raise BillingError("X-Senseless-Upload: 1 required")
+            if req.content_length is not None and req.content_length > MAX_IMPORT_BYTES:
+                raise BillingError("upload exceeds 20 MiB")
+            data = bytearray()
+            async for chunk in req.content.iter_chunked(64 * 1024):
+                if len(data) + len(chunk) > MAX_IMPORT_BYTES:
+                    raise BillingError("upload exceeds 20 MiB")
+                data.extend(chunk)
+            return web.json_response(await asyncio.to_thread(b.preview_import if preview else b.import_data, bytes(data)))
+        except BillingError as e:
+            return _bad(e)
+
+    async def billing_import(req):
+        return await billing_upload(req)
+
+    async def billing_preview(req):
+        return await billing_upload(req, preview=True)
+
+    def billing_write_guard(req):
+        origin = req.headers.get('Origin')
+        if origin and origin.split('://', 1)[-1] != req.host:
+            raise web.HTTPForbidden(text='cross-origin write refused')
+
+    async def csv_profiles_get(_):
+        return web.json_response(await asyncio.to_thread(_bill().csv_profiles))
+
+    async def csv_profiles_post(req):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().save_csv_profile, await _body(req)))
+        except BillingError as e:
+            return _bad(e)
+
+    async def csv_profiles_delete(req):
+        billing_write_guard(req)
+        try:
+            await asyncio.to_thread(_bill().remove_csv_profile, req.query.get('name', ''))
+            return web.json_response({'ok': True})
+        except KeyError:
+            raise web.HTTPNotFound(text='no such CSV profile') from None
+
+    async def tariffs_get(_):
+        return web.json_response(await asyncio.to_thread(_bill().tariffs.list))
+
+    async def tariff_get(req):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().tariffs.get, req.match_info['pack']))
+        except BillingError:
+            raise web.HTTPNotFound(text='no such tariff pack') from None
+
+    async def tariffs_post(req):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().save_tariff, await _body(req)))
+        except BillingError as e:
+            return _bad(e)
+
+    async def tariff_delete(req):
+        billing_write_guard(req)
+        try:
+            await asyncio.to_thread(_bill().remove_tariff, req.match_info['pack'])
+            return web.json_response({'ok': True})
+        except BillingError as e:
+            return _bad(e)
+        except KeyError:
+            raise web.HTTPNotFound(text='no such tariff pack') from None
+
+    async def billing_insights(_):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().insights))
+        except BillingError as e:
+            return _bad(e)
+        except HistoryError:
+            return web.json_response({"error": "Sense history unavailable"}, status=502)
 
     async def billing_estimate(req):
-        from .billing import estimate
         try:
             kwh = float(req.query["kwh"])
             on = float(req.query["on_peak_kwh"]) if "on_peak_kwh" in req.query else None
@@ -646,8 +734,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         except (KeyError, ValueError):
             return _bad("kwh (0+), optional on_peak_kwh (0..kwh) and months (0.1-24) must be numbers")
         try:
-            s = await asyncio.to_thread(_bill().settings)
-            return web.json_response(estimate(s, kwh, on, req.query.get("plan"), months))
+            return web.json_response(await asyncio.to_thread(_bill().estimate, kwh, on, req.query.get("plan"), months))
         except BillingError as e:
             return _bad(e)
 
@@ -710,6 +797,13 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.get("/api", api_index),
         web.get("/api/billing", billing_get), web.post("/api/billing", billing_post),
         web.get("/api/billing/cycle", billing_cycle), web.get("/api/billing/estimate", billing_estimate),
+        web.put("/api/billing/import", billing_import), web.get("/api/billing/insights", billing_insights),
+        web.post('/api/billing/import/preview', billing_preview),
+        web.get('/api/billing/csv-profiles', csv_profiles_get),
+        web.post('/api/billing/csv-profiles', csv_profiles_post),
+        web.delete('/api/billing/csv-profiles', csv_profiles_delete),
+        web.get('/api/billing/tariffs', tariffs_get), web.post('/api/billing/tariffs', tariffs_post),
+        web.get('/api/billing/tariffs/{pack}', tariff_get), web.delete('/api/billing/tariffs/{pack}', tariff_delete),
         web.get("/api/billing/bills", bills_get), web.post("/api/billing/bills", bills_add),
         web.delete("/api/billing/bills/{id}", bills_remove),
         web.get("/api/hunt", hunt_get),
