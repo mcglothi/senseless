@@ -2,6 +2,13 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.11.1 (2026-10-16)
+
+### Fixed
+- Cycles: a real wash pauses about four minutes to drain or fill before the spin, which split it into two
+  cycles. Activity gaps up to 6 minutes now stay one cycle (replayed: the 2026-10-16 wash is one 08:19-09:06
+  cycle again; 10 minutes would swallow unrelated later steps).
+
 ## 0.11.0 (2026-10-16)
 
 ### Added

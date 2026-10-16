@@ -18,7 +18,7 @@ from .detect import FPS, POWER_BIN_FRAMES, Run, bin_readings, to_steps
 from .hunt import CHATTER_MAX_S, CHATTER_MAX_W, CHATTER_MIN_RUNS
 
 MIN_STEP_W = 120
-GAP_S = 240  # the replayed wash has a 210 s pause; 180 s splits it
+GAP_S = 360  # real washes pause ~4 min to drain or fill before the spin: 240 s split one; 600 s over-reaches
 MIN_STEPS = 12
 MIN_DURATION_S = 300
 MAX_DURATION_S = 4 * 3600
