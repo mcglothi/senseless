@@ -222,7 +222,7 @@ function Settings({ config, save }) {
   const [pack, setPack] = useState(null)
   useEffect(() => { api('GET', '/api/billing/tariffs').then(setPacks).catch(() => {}) }, [])
   useEffect(() => { if (s.pack) api('GET', `/api/billing/tariffs/${s.pack}`).then(setPack).catch(() => setPack(null)) }, [s.pack])
-  const plan = pack?.plans.find(p => p.id === s.plan)
+  const plan = pack?.plans.find(p => p.id === s.plan) ?? (s.plan === 'custom' ? { label: 'Custom', components: [], source: 'entered by you' } : null)
   const supply = pack?.supply?.find(p => p.id === s.supply)
   const [draft, setDraft] = useState(null)
   const num = (k, scale = 1) => (draft?.[k] ?? String(Number((s[k] * scale).toFixed(6))))   // 0.12721*100 is 12.720999…
@@ -235,6 +235,11 @@ function Settings({ config, save }) {
     if (Number.isFinite(v) && v !== s[k]) save({ [k]: k === 'billing_day' || k === 'tax_exempt_kwh' ? Math.round(v) : v })
   }
   const edit = k => e => setDraft(d => ({ ...d, [k]: e.target.value }))
+  // a bundled plan includes its own supply; any other plan needs one, so restore the pack's default
+  const choosePlan = id => {
+    const next = pack?.plans.find(p => p.id === id)
+    save(next?.kind === 'bundled' ? { plan: id, supply: null } : { plan: id, supply: s.supply ?? pack?.supply?.[0]?.id ?? null })
+  }
   const choosePack = async id => {
     const p = await api('GET', `/api/billing/tariffs/${id}`).catch(() => null)
     if (!p) return
@@ -250,8 +255,9 @@ function Settings({ config, save }) {
           </select>
         </Field>
         <Field label="Delivery plan">
-          <select value={s.plan} onChange={e => save({ plan: e.target.value })} style={input} disabled={!pack}>
+          <select value={s.plan} onChange={e => choosePlan(e.target.value)} style={input} disabled={!pack}>
             {(pack?.plans ?? []).map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            <option value="custom">Custom (enter your own rates)</option>
           </select>
         </Field>
         {(pack?.supply?.length ?? 0) > 0 && (
