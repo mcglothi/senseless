@@ -70,6 +70,23 @@ def today(db_path: Path, cost_cents_per_kwh: float | None, now: float | None = N
     }
 
 
+def baseline(db_path: Path, hours: float = 24, pct: float = 0.05, now: float | None = None) -> dict:
+    """Always-on load measured by Senseless: each leg's low percentile over the window (robust to noise
+    and to brief dips, unlike a minimum). Total = sum of the legs' baselines."""
+    now = now if now is not None else time.time()
+    db = _connect(db_path)
+    try:
+        rows = db.execute("SELECT l1_w, l2_w FROM readings WHERE ts >= ? AND l1_w IS NOT NULL AND l2_w IS NOT NULL",
+                          (now - hours * 3600,)).fetchall()
+    finally:
+        db.close()
+    if len(rows) < 120:  # under a minute of data: not meaningful yet
+        return {"hours": hours, "samples": len(rows), "l1_w": None, "l2_w": None, "w": None}
+    q = lambda xs: sorted(xs)[int(pct * (len(xs) - 1))]
+    l1, l2 = q([r["l1_w"] for r in rows]), q([r["l2_w"] for r in rows])
+    return {"hours": hours, "samples": len(rows), "pct": pct, "l1_w": round(l1, 1), "l2_w": round(l2, 1), "w": round(l1 + l2, 1)}
+
+
 def series(db_path: Path, start: float, end: float, bucket_s: float) -> list[dict]:
     """Per-leg power averaged into fixed buckets over [start, end), for charts (one row per bucket with data).
     Also min/max per bucket, so zoomed-out charts still show short spikes."""

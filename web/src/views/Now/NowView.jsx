@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { C, MONO, alpha, glow, useTheme } from '../../ui/theme'
 import { SectionTitle } from '../../ui/primitives'
 import { api } from '../../api/api'
-import { WINDOW_S } from '../../hooks/useLive'
+import { WINDOW_S, useBaseline } from '../../hooks/useLive'
 import { find240V, fmtClock, fmtInt, fmtMoney, fmtSigned, legShare, repeatingSteps } from '../../ui/format'
 import { matchStep } from '../../hooks/useLoads'
 import { inboxOf } from '../../ui/loads'
@@ -251,27 +251,26 @@ function Spotted({ dayDeltas, pairs, cyclers, inboxCount }) {
   )
 }
 
-function AlwaysOn({ latest, series, today }) {
-  const ao = latest?.devices?.find(d => d.name === 'Always On')?.w
+function AlwaysOn({ latest, today }) {
+  const base = useBaseline()
+  const senseAo = latest?.devices?.find(d => d.name === 'Always On')?.w
+  const ours = base?.w != null
+  const w = ours ? base.w : senseAo
   const cents = today?.cost_cents_per_kwh
-  const perDay = ao != null && cents ? (ao * 24 / 1000) * cents / 100 : null
-  // rough per-leg split: the ratio of each leg's lowest point in the window, applied to the baseline
-  const legs = series.filter(b => b.l1 != null)
-  const share = legs.length ? legShare(Math.min(...legs.map(b => b.l1)), Math.min(...legs.map(b => b.l2))) : null
-  const min1 = share && ao != null ? (ao * share[0]) / 100 : null
-  const min2 = share && ao != null ? (ao * share[1]) / 100 : null
+  const perDay = w != null && cents ? (w * 24 / 1000) * cents / 100 : null
+  const share = ours ? legShare(base.l1_w, base.l2_w) : null
   return (
     <Card>
-      <Kicker>Always on</Kicker>
+      <Kicker right={<span style={{ fontFamily: MONO, fontSize: 10, color: C.dim }}>{ours ? 'measured · lowest 5% of 24 h' : senseAo != null ? "Sense's estimate" : 'not enough data yet'}</span>}>Always on</Kicker>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 40, fontWeight: 700, color: C.bright }}>{fmtInt(ao)}</span>
+        <span style={{ fontSize: 40, fontWeight: 700, color: C.bright }}>{fmtInt(w)}</span>
         <span style={{ color: C.muted, fontSize: 14 }}>W baseline{perDay != null ? ` · ${fmtMoney(perDay)}/day · $${fmtInt(perDay * 365)}/yr` : ''}</span>
       </div>
-      {share && min1 != null && (
+      {ours && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontFamily: MONO, fontSize: 11, color: C.body }}>
-          {[[1, min1, share[0]], [2, min2, share[1]]].map(([leg, w, pct]) => (
+          {[[1, base.l1_w, share[0]], [2, base.l2_w, share[1]]].map(([leg, lw, pct]) => (
             <div key={leg}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}><span>L{leg}</span><span>≈{fmtInt(w)} W</span></div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}><span>L{leg}</span><span>{fmtInt(lw)} W</span></div>
               <div style={{ height: 6, borderRadius: 3, background: C.field }}>
                 <div style={{ width: `${pct}%`, height: 6, borderRadius: 3, background: leg === 1 ? C.l1 : C.l2 }} />
               </div>
@@ -280,8 +279,8 @@ function AlwaysOn({ latest, series, today }) {
         </div>
       )}
       <p style={{ color: C.muted, fontSize: 13, lineHeight: 1.5 }}>
-        Sense's always-on estimate, split by the ratio of each leg's lowest point in the last 30 minutes.
-        {share && share[1] >= 70 ? ' Most of it sits on L2: a breaker hunt there would find it.' : share && share[0] >= 70 ? ' Most of it sits on L1.' : ''}
+        {ours && senseAo != null ? `Sense estimates ${fmtInt(senseAo)} W. ` : ''}
+        {share && share[1] >= 70 ? 'Most of it sits on L2: a breaker hunt there would find it.' : share && share[0] >= 70 ? 'Most of it sits on L1: a breaker hunt there would find it.' : ''}
       </p>
       <a href="/hunt" onClick={link('/hunt')} style={{ alignSelf: 'flex-start', fontFamily: MONO, fontSize: 11, letterSpacing: 1, textTransform: 'uppercase',
         padding: '10px 14px', borderRadius: 8, color: C.accent, background: alpha(C.accent, '14'), border: `1px solid ${alpha(C.accent, '45')}` }}>
@@ -337,7 +336,7 @@ export function NowView({ live, today, loads }) {
       <div style={grid(340)}>
         <Feed deltas={deltas} pairs={pairs} cyclers={cyclers} patterns={loads.patterns} />
         <Spotted dayDeltas={dayDeltas} pairs={pairs} cyclers={cyclers} inboxCount={inboxOf(loads.patterns).length} />
-        <AlwaysOn latest={latest} series={series} today={today} />
+        <AlwaysOn latest={latest} today={today} />
       </div>
     </div>
   )

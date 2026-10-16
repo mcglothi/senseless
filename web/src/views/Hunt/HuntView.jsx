@@ -4,6 +4,7 @@ import { toast } from '../../ui/primitives'
 import { api } from '../../api/api'
 import { fmtInt, fmtSigned } from '../../ui/format'
 import { explained, huntDrop, legAverage } from '../../ui/hunt'
+import { useBaseline } from '../../hooks/useLive'
 
 // Breaker Hunt, for standing at the panel with a phone: capture a baseline, flip a breaker,
 // see exactly what dropped on which leg, name the breaker, flip it back, repeat.
@@ -64,7 +65,9 @@ export function HuntView({ live }) {
   const current = legAverage(readings, 3, now)
   const [l1, l2] = live.latest?.channels ?? []
   const drop = baseline ? huntDrop(baseline, current, live.deltas) : null
-  const alwaysOn = live.latest?.devices?.find(d => d.name === 'Always On')?.w
+  const base = useBaseline()
+  // Senseless's measured baseline when available, else Sense's estimate
+  const alwaysOn = base?.w ?? live.latest?.devices?.find(d => d.name === 'Always On')?.w
   const exp = explained(circuits.list, alwaysOn)
 
   const healthy = live.status.state === 'live' && live.status.healthy

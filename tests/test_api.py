@@ -247,3 +247,18 @@ def test_circuits_api(tmp_path):
             assert (await c.delete(f"/api/circuits/{row['id']}")).status == 404
             assert (await c.get("/api/circuits")).status == 200
     asyncio.run(run())
+
+
+def test_baseline_is_a_low_percentile_per_leg(tmp_path):
+    s = Store(tmp_path / "t.db")
+    now = 1_800_000_000.0
+    for i in range(1000):
+        # L1 ~70 W with a brief 0 W dip; L2 ~840 W with loads on top most of the time
+        l1 = 0.0 if i == 5 else 70.0 + (i % 3)
+        l2 = 840.0 + (600.0 if i % 4 else 0.0)
+        s.realtime({"frame": 1000 + i * 60, "epoch": now - 1000 + i, "w": l1 + l2, "channels": [l1, l2], "voltage": [120, 120], "hz": 60}, now - 1000 + i)
+    s.close()
+    b = summary.baseline(tmp_path / "t.db", now=now)
+    assert 70 <= b["l1_w"] <= 72          # the single 0 W dip doesn't drag it down
+    assert b["l2_w"] == 840.0 and b["w"] == pytest.approx(b["l1_w"] + 840.0)
+    assert summary.baseline(tmp_path / "t.db", now=now + 30 * 86400)["w"] is None   # no recent data
