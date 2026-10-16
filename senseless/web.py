@@ -51,9 +51,17 @@ API_INDEX = [
     {"method": "GET", "path": "/api/circuits", "does": "mapped breakers"},
     {"method": "POST", "path": "/api/circuits", "body": {"breaker": "str", "name": "str?", "l1_w": "num", "l2_w": "num"}, "does": "add a breaker by hand"},
     {"method": "DELETE", "path": "/api/circuits/{id}", "does": "remove a mapped breaker"},
+    {"method": "GET", "path": "/api/property", "does": "property with buildings and nested floors, highest level first"},
+    {"method": "PATCH", "path": "/api/property", "body": {"name": "str"}, "does": "rename the property"},
+    {"method": "PUT", "path": "/api/property/image", "does": "upload a site image (raw body, header X-Senseless-Upload: 1)"},
+    {"method": "GET", "path": "/api/property/image", "does": "the property's site image"},
+    {"method": "DELETE", "path": "/api/property/image", "does": "remove the site image; returns property"},
+    {"method": "POST", "path": "/api/buildings", "body": {"name": "str", "icon": "str?", "x": "0-1?", "y": "0-1?", "w": "0-1?", "h": "0-1?"}, "does": "add a building"},
+    {"method": "PATCH", "path": "/api/buildings/{id}", "does": "rename / reorder / place a building"},
+    {"method": "DELETE", "path": "/api/buildings/{id}", "does": "delete a building and its floors, rooms, markers and images"},
     {"method": "GET", "path": "/api/floors", "does": "floors with rooms and markers (coordinates 0-1)"},
-    {"method": "POST", "path": "/api/floors", "body": {"name": "str"}, "does": "add a floor"},
-    {"method": "PATCH", "path": "/api/floors/{id}", "does": "rename / reorder a floor"},
+    {"method": "POST", "path": "/api/floors", "body": {"name": "str", "building_id": "int?", "level": "-5..20?"}, "does": "add a floor"},
+    {"method": "PATCH", "path": "/api/floors/{id}", "does": "rename / reorder / move a floor (building_id, level)"},
     {"method": "DELETE", "path": "/api/floors/{id}", "does": "delete a floor"},
     {"method": "PUT", "path": "/api/floors/{id}/image", "does": "upload a plan image (raw body, header X-Senseless-Upload: 1)"},
     {"method": "POST", "path": "/api/floors/{id}/rooms", "body": {"name": "str", "x": "0-1", "y": "0-1", "w": "0-1", "h": "0-1"}, "does": "add a room"},
@@ -436,7 +444,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             raise web.HTTPNotFound(text="floor plans not configured")
         return floorplans
 
-    def floorplan_handler(operation, *, write=False, delete=False):
+    def floorplan_handler(operation, *, write=False, delete=False, returns_result=False):
         async def handler(req):
             try:
                 args = []
@@ -452,13 +460,13 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
                     if origin and origin.split("://", 1)[-1] != req.host:
                         raise web.HTTPForbidden(text="cross-origin write refused")
                 result = await asyncio.to_thread(getattr(_fp(), operation), *args)
-                return web.json_response({"ok": True} if delete else result)
+                return web.json_response({"ok": True} if delete and not returns_result else result)
             except web.HTTPBadRequest as e:
                 return _bad(e.text)
             except FloorplanError as e:
                 return _bad(e)
             except KeyError:
-                raise web.HTTPNotFound(text="no such floor, room, marker or image") from None
+                raise web.HTTPNotFound(text="no such building, floor, room, marker or image") from None
         return handler
 
     async def floor_image_put(req):
@@ -477,11 +485,15 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
                 if len(data) + len(chunk) > MAX_IMAGE_BYTES:
                     raise FloorplanError("image exceeds 15 MiB")
                 data.extend(chunk)
-            try:
-                ident = int(req.match_info["id"])
-            except ValueError:
-                raise FloorplanError("id must be an integer") from None
-            return web.json_response(await asyncio.to_thread(_fp().put_image, ident, data, req.content_type))
+            if "id" in req.match_info:
+                try:
+                    ident = int(req.match_info["id"])
+                except ValueError:
+                    raise FloorplanError("id must be an integer") from None
+                result = await asyncio.to_thread(_fp().put_image, ident, data, req.content_type)
+            else:
+                result = await asyncio.to_thread(_fp().put_property_image, data, req.content_type)
+            return web.json_response(result)
         except FloorplanError as e:
             return _bad(e)
         except KeyError:
@@ -489,11 +501,14 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
 
     async def floor_image_get(req):
         try:
-            try:
-                ident = int(req.match_info["id"])
-            except ValueError:
-                raise FloorplanError("id must be an integer") from None
-            path = await asyncio.to_thread(_fp().image, ident)
+            if "id" in req.match_info:
+                try:
+                    ident = int(req.match_info["id"])
+                except ValueError:
+                    raise FloorplanError("id must be an integer") from None
+                path = await asyncio.to_thread(_fp().image, ident)
+            else:
+                path = await asyncio.to_thread(_fp().property_image)
             return web.FileResponse(path, headers={
                 "Cache-Control": "max-age=31536000, immutable",
                 "X-Content-Type-Options": "nosniff",
@@ -680,7 +695,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
     app.add_routes([
         web.get("/", index), web.get("/status", legacy),
         # client-side routes: reloading them must serve the app, not 404
-        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt", "/map", "/bill")],
+        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt", "/map", "/map/b/{building_id}", "/map/b/{building_id}/f/{floor_id}", "/bill")],
         web.get("/healthz", healthz), web.get("/metrics", metrics),
         web.get("/api/status", status), web.get("/api/deltas", deltas), web.get("/api/readings", readings),
         web.get("/api/today", today), web.get("/api/series", series), web.get("/api/baseline", baseline_get), web.get("/api/stream", stream),
@@ -701,6 +716,14 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.post("/api/hunt/start", hunt_cmd(_start)), web.post("/api/hunt/save", hunt_cmd(_save)),
         web.post("/api/hunt/label", hunt_cmd(_label)), web.post("/api/hunt/retry", hunt_cmd(_retry)),
         web.post("/api/hunt/stop", hunt_cmd(_stop)),
+        web.get("/api/property", floorplan_handler("property")),
+        web.patch("/api/property", floorplan_handler("update_property", write=True)),
+        web.put("/api/property/image", floor_image_put),
+        web.get("/api/property/image", floor_image_get),
+        web.delete("/api/property/image", floorplan_handler("remove_property_image", delete=True, returns_result=True)),
+        web.post("/api/buildings", floorplan_handler("add_building", write=True)),
+        web.patch("/api/buildings/{id}", floorplan_handler("update_building", write=True)),
+        web.delete("/api/buildings/{id}", floorplan_handler("remove_building", delete=True)),
         web.get("/api/floors", floorplan_handler("all")),
         web.post("/api/floors", floorplan_handler("add_floor", write=True)),
         web.patch("/api/floors/{id}", floorplan_handler("update_floor", write=True)),

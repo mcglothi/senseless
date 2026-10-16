@@ -14,6 +14,7 @@ from pathlib import Path
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 IMAGE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 ICONS = frozenset("plug bolt fan heater ac fridge microwave oven washer dryer dishwasher pump water light tv computer router car tub tool panel other".split())
+BUILDING_ICONS = frozenset("house garage barn shed greenhouse pool workshop office other".split())
 
 
 class FloorplanError(ValueError):
@@ -94,7 +95,9 @@ class Floorplans:
         self.image_dir = Path(data_dir) / "floorplans"
         self.image_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._lock, self._conn() as db:
+        # Rebuilding floors requires foreign keys off, before starting the transaction.
+        # Child tables still reference the final floors name; no child rows are deleted.
+        with self._lock, self._conn(foreign_keys=False) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS floors (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
@@ -110,12 +113,56 @@ class Floorplans:
                     kind TEXT NOT NULL, ref TEXT, label TEXT, icon TEXT,
                     x REAL NOT NULL, y REAL NOT NULL, created REAL NOT NULL);
             """)
+            self._migrate(db)
+
+    @staticmethod
+    def _migrate(db):
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("""CREATE TABLE IF NOT EXISTS buildings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+            icon TEXT NOT NULL DEFAULT 'house', ord INTEGER NOT NULL DEFAULT 0,
+            x REAL, y REAL, w REAL, h REAL, created REAL NOT NULL)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS property (
+            id INTEGER PRIMARY KEY CHECK (id=1), name TEXT NOT NULL DEFAULT 'Home',
+            image TEXT, img_w INTEGER, img_h INTEGER)""")
+        db.execute("INSERT OR IGNORE INTO property (id) VALUES (1)")
+        columns = {r['name']: r for r in db.execute('PRAGMA table_info(floors)')}
+        foreign_keys = list(db.execute('PRAGMA foreign_key_list(floors)'))
+        if (not {'building_id', 'level'} <= columns.keys()
+                or not columns['building_id']['notnull'] or not columns['level']['notnull']
+                or not any(r['from'] == 'building_id' and r['table'] == 'buildings'
+                           and r['on_delete'] == 'CASCADE' for r in foreign_keys)):
+            rows = [dict(r) for r in db.execute('SELECT * FROM floors ORDER BY ord, id')]
+            unassigned = [r for r in rows if r.get('building_id') is None]
+            if unassigned:
+                building = db.execute("""INSERT INTO buildings (name, created)
+                    VALUES ('Main house', ?)""", (time.time(),)).lastrowid
+                for level, row in enumerate(unassigned):
+                    row.update(building_id=building, level=level)
+            sequence = db.execute("SELECT seq FROM sqlite_sequence WHERE name='floors'").fetchone()
+            db.execute("""CREATE TABLE floors_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                ord INTEGER NOT NULL DEFAULT 0, image TEXT, img_w INTEGER, img_h INTEGER,
+                created REAL NOT NULL,
+                building_id INTEGER NOT NULL REFERENCES buildings(id) ON DELETE CASCADE,
+                level INTEGER NOT NULL CHECK (typeof(level)='integer' AND level BETWEEN -5 AND 20))""")
+            fields = ('id', 'name', 'ord', 'image', 'img_w', 'img_h', 'created', 'building_id', 'level')
+            for row in rows:
+                db.execute(f"INSERT INTO floors_new ({','.join(fields)}) VALUES ({','.join('?' for _ in fields)})",
+                           [row[k] for k in fields])
+            db.execute('DROP TABLE floors')
+            db.execute('ALTER TABLE floors_new RENAME TO floors')
+            if sequence:
+                db.execute("UPDATE sqlite_sequence SET seq=MAX(seq, ?) WHERE name='floors'", (sequence[0],))
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS floors_building_level ON floors(building_id, level)')
+        if list(db.execute('PRAGMA foreign_key_check')):
+            raise FloorplanError('invalid floor plan references during migration')
 
     @contextmanager
-    def _conn(self):
+    def _conn(self, *, foreign_keys=True):
         db = sqlite3.connect(self.db_path, timeout=10)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
+        db.execute("PRAGMA foreign_keys=" + ('ON' if foreign_keys else 'OFF'))
         try:
             with db:
                 yield db
@@ -142,7 +189,84 @@ class Floorplans:
 
     def all(self):
         with self._conn() as db:
+            db.execute('BEGIN')
             return [self._floor(db, r[0]) for r in db.execute("SELECT id FROM floors ORDER BY ord, id")]
+
+    def _property(self, db):
+        row = self._row(db, 'property', 1)
+        row.pop('id')
+        filename = row['image']
+        row['image'] = f'/api/property/image?v={filename}' if filename else None
+        row['buildings'] = []
+        for building in db.execute('SELECT * FROM buildings ORDER BY ord, id'):
+            building = dict(building)
+            building['floors'] = [self._floor(db, f[0]) for f in db.execute(
+                'SELECT id FROM floors WHERE building_id=? ORDER BY level DESC, ord, id', (building['id'],))]
+            row['buildings'].append(building)
+        return row
+
+    def property(self):
+        with self._conn() as db:
+            db.execute('BEGIN')
+            return self._property(db)
+
+    def update_property(self, body):
+        self._fields(body, {'name'})
+        with self._lock, self._conn() as db:
+            if 'name' in body:
+                db.execute('UPDATE property SET name=? WHERE id=1', (self._text(body['name'], 'name'),))
+            return self._property(db)
+
+    @staticmethod
+    def _ord(value):
+        if type(value) is not int or not 0 <= value <= 1000:
+            raise FloorplanError('ord must be an integer between 0 and 1000')
+        return value
+
+    def _validate_building(self, row):
+        row['name'] = self._text(row.get('name'), 'name')
+        if not isinstance(row.get('icon'), str) or row['icon'] not in BUILDING_ICONS:
+            raise FloorplanError('invalid building icon')
+        row['ord'] = self._ord(row['ord'])
+        fields = ('x', 'y', 'w', 'h')
+        if all(row.get(k) is None for k in fields):
+            return
+        for k in fields:
+            row[k] = self._number(row.get(k), k)
+        if row['w'] < 0.02 or row['h'] < 0.02 or row['x'] + row['w'] > 1 or row['y'] + row['h'] > 1:
+            raise FloorplanError('building dimensions must be at least 0.02 and fit inside image')
+
+    def add_building(self, body):
+        self._fields(body, {'name', 'icon', 'x', 'y', 'w', 'h'})
+        row = dict(icon='house', ord=0, x=None, y=None, w=None, h=None)
+        row.update(body)
+        self._validate_building(row)
+        with self._lock, self._conn() as db:
+            fields = ('name', 'icon', 'ord', 'x', 'y', 'w', 'h')
+            cur = db.execute(f"INSERT INTO buildings ({','.join(fields)}, created) VALUES ({','.join('?' for _ in fields)}, ?)",
+                             [row[k] for k in fields] + [time.time()])
+            return self._row(db, 'buildings', cur.lastrowid)
+
+    def update_building(self, ident, body):
+        fields = ('name', 'icon', 'ord', 'x', 'y', 'w', 'h')
+        self._fields(body, fields)
+        with self._lock, self._conn() as db:
+            row = self._row(db, 'buildings', ident)
+            row.update(body)
+            self._validate_building(row)
+            db.execute(f"UPDATE buildings SET {','.join(k + '=?' for k in fields)} WHERE id=?",
+                       [row[k] for k in fields] + [ident])
+            return self._row(db, 'buildings', ident)
+
+    def remove_building(self, ident):
+        with self._lock:
+            with self._conn() as db:
+                self._row(db, 'buildings', ident)
+                paths = [self._path(r[0]) for r in db.execute(
+                    'SELECT image FROM floors WHERE building_id=? AND image IS NOT NULL', (ident,))]
+                db.execute('DELETE FROM buildings WHERE id=?', (ident,))
+            for path in paths:
+                path.unlink(missing_ok=True)
 
     @staticmethod
     def _fields(body, allowed):
@@ -174,30 +298,60 @@ class Floorplans:
             raise FloorplanError(f"at most {maximum} {table}" + (" per floor" if floor_id is not None else ""))
 
     def add_floor(self, body):
-        self._fields(body, {"name"})
+        self._fields(body, {"name", "building_id", "level"})
         name = self._text(body.get("name"), "name")
         with self._lock, self._conn() as db:
             self._limit(db, "floors", 20)
-            cur = db.execute("INSERT INTO floors (name, created) VALUES (?,?)", (name, time.time()))
+            building = body.get('building_id')
+            if 'building_id' not in body:
+                first = db.execute('SELECT id FROM buildings ORDER BY ord, id LIMIT 1').fetchone()
+                building = first[0] if first else db.execute(
+                    "INSERT INTO buildings (name, created) VALUES ('Main house', ?)", (time.time(),)).lastrowid
+            self._building_id(db, building)
+            level = body['level'] if 'level' in body else self._next_level(db, building)
+            self._level(db, building, level)
+            cur = db.execute("INSERT INTO floors (name, building_id, level, created) VALUES (?,?,?,?)",
+                             (name, building, level, time.time()))
             return self._floor(db, cur.lastrowid)
 
+    def _building_id(self, db, value):
+        if type(value) is not int or not 0 < value <= 2**63 - 1:
+            raise FloorplanError('building_id must be a positive integer')
+        self._row(db, 'buildings', value)
+
+    @staticmethod
+    def _next_level(db, building):
+        used = {r[0] for r in db.execute('SELECT level FROM floors WHERE building_id=?', (building,))}
+        # Ground upwards first; use basement levels if all above-ground levels are occupied.
+        return next(level for level in (*range(21), *range(-1, -6, -1)) if level not in used)
+
+    @staticmethod
+    def _level(db, building, value, ident=None):
+        if type(value) is not int or not -5 <= value <= 20:
+            raise FloorplanError('level must be an integer between -5 and 20')
+        if db.execute('SELECT id FROM floors WHERE building_id=? AND level=? AND id!=?',
+                      (building, value, ident or 0)).fetchone():
+            raise FloorplanError('level already exists in this building')
+
     def update_floor(self, ident, body):
-        self._fields(body, {"name", "ord"})
+        self._fields(body, {"name", "ord", "building_id", "level"})
         with self._lock, self._conn() as db:
             row = self._row(db, "floors", ident)
             if "name" in body:
                 row["name"] = self._text(body["name"], "name")
             if "ord" in body:
-                value = body["ord"]
-                if type(value) is not int or not 0 <= value <= 1000:
-                    raise FloorplanError("ord must be an integer between 0 and 1000")
-                row["ord"] = value
-            db.execute("UPDATE floors SET name=?, ord=? WHERE id=?", (row["name"], row["ord"], ident))
+                row["ord"] = self._ord(body['ord'])
+            row['building_id'] = body.get('building_id', row['building_id'])
+            row['level'] = body.get('level', row['level'])
+            self._building_id(db, row['building_id'])
+            self._level(db, row['building_id'], row['level'], ident)
+            db.execute("UPDATE floors SET name=?, ord=?, building_id=?, level=? WHERE id=?",
+                       (row["name"], row["ord"], row['building_id'], row['level'], ident))
             return self._floor(db, ident)
 
     def _path(self, filename):
         # Only server-generated basenames may ever become filesystem paths.
-        if not isinstance(filename, str) or not re.fullmatch(r"floor-[0-9]+-[0-9a-f]{32}\.(png|jpg|webp)", filename):
+        if not isinstance(filename, str) or not re.fullmatch(r"(?:floor-[0-9]+|property-1)-[0-9a-f]{32}\.(png|jpg|webp)", filename):
             raise FloorplanError("invalid stored image path")
         path = self.image_dir / filename
         if path.resolve().parent != self.image_dir.resolve() or path.is_symlink():
@@ -279,6 +433,12 @@ class Floorplans:
         self._remove_child("markers", ident)
 
     def put_image(self, ident, data, content_type):
+        return self._put_image('floors', ident, data, content_type)
+
+    def put_property_image(self, data, content_type):
+        return self._put_image('property', 1, data, content_type)
+
+    def _put_image(self, table, ident, data, content_type):
         if len(data) > MAX_IMAGE_BYTES:
             raise FloorplanError("image exceeds 15 MiB")
         w, h = image_dimensions(data, content_type)
@@ -287,15 +447,16 @@ class Floorplans:
             created = False
             try:
                 with self._conn() as db:
-                    row = self._row(db, "floors", ident)
+                    row = self._row(db, table, ident)
                     old = self._path(row["image"]) if row["image"] else None
-                    filename = f"floor-{ident}-{secrets.token_hex(16)}.{IMAGE_TYPES[content_type]}"
+                    prefix = 'floor' if table == 'floors' else 'property'
+                    filename = f"{prefix}-{ident}-{secrets.token_hex(16)}.{IMAGE_TYPES[content_type]}"
                     path = self._path(filename)
                     with path.open("xb") as f:
                         created = True
                         f.write(data)
-                    db.execute("UPDATE floors SET image=?, img_w=?, img_h=? WHERE id=?", (filename, w, h, ident))
-                    result = self._floor(db, ident)
+                    db.execute(f"UPDATE {table} SET image=?, img_w=?, img_h=? WHERE id=?", (filename, w, h, ident))
+                    result = self._floor(db, ident) if table == 'floors' else self._property(db)
             except Exception:
                 if created:
                     path.unlink(missing_ok=True)
@@ -305,8 +466,25 @@ class Floorplans:
             return result
 
     def image(self, ident):
+        return self._image('floors', ident)
+
+    def property_image(self):
+        return self._image('property', 1)
+
+    def remove_property_image(self):
+        with self._lock:
+            with self._conn() as db:
+                row = self._row(db, 'property', 1)
+                path = self._path(row['image']) if row['image'] else None
+                db.execute('UPDATE property SET image=NULL, img_w=NULL, img_h=NULL WHERE id=1')
+                result = self._property(db)
+            if path:
+                path.unlink(missing_ok=True)
+            return result
+
+    def _image(self, table, ident):
         with self._conn() as db:
-            row = self._row(db, "floors", ident)
+            row = self._row(db, table, ident)
             if not row["image"]:
                 raise KeyError(ident)
             path = self._path(row["image"])

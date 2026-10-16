@@ -72,7 +72,7 @@ MARKER = dict(kind='load', ref=' Microwave ', x=0.3, y=0.4)
 
 
 def test_crud_and_persistence(fp, floor, tmp_path):
-    assert fp.all() == [dict(id=floor, name='Ground', ord=0, image_url=None, img_w=None, img_h=None, rooms=[], markers=[])]
+    assert fp.all() == [dict(id=floor, name='Ground', building_id=1, level=0, ord=0, image_url=None, img_w=None, img_h=None, rooms=[], markers=[])]
     other = fp.add_floor({'name': 'Upstairs'})['id']
     fp.update_floor(floor, {'name': ' Downstairs ', 'ord': 10})
     assert [f['id'] for f in fp.all()] == [other, floor]
