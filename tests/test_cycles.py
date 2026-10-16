@@ -236,7 +236,7 @@ def test_pause_tolerance_and_generation_boundaries(tmp_path):
     assert len(run_pipeline(tmp_path, ds, rs)[0]) == 1
     # Above the gap threshold splits activity. The second segment's already-high
     # baseline cannot confirm another cycle without a new power rise.
-    ds = [d for d in ds if not 1800 <= d["ts"] < 1900]
+    ds = [d for d in ds if not 1800 <= d["ts"] < 1580 + cycles.GAP_S + 40]
     found, _, _ = run_pipeline(tmp_path, ds, rs)
     assert len(found) == 1 and found[0].end_ts == 1580
     ds2, rs2 = program(start=3600, generation=1)
@@ -326,7 +326,7 @@ def test_growing_cycles_cluster_only_after_completion(tmp_path):
     assert grown.pattern == provisional_id
     assert next(p for p in cp.all() if p["id"] == short.pattern)["duration_s"] == 300
     cp.name(grown.pattern, "Washer")
-    cp.assign([short, grown], 6300)
+    cp.assign([short, grown], 6000 + cycles.GAP_S + 60)     # complete: idle longer than the gap
     p = next(p for p in cp.all() if p["id"] == grown.pattern)
     assert p["duration_s"] == 2400 and p["energy_wh"] == 400 and not p["provisional"]
     # Another wash seen while growing stays independent, then joins the final
@@ -335,7 +335,7 @@ def test_growing_cycles_cluster_only_after_completion(tmp_path):
     cp.assign([grown, next_wash], 7500)
     assert next_wash.pattern != grown.pattern
     final_wash = replace(next_wash, end_ts=9600, energy_wh=400)
-    cp.assign([grown, final_wash], 9900)
+    cp.assign([grown, final_wash], 9600 + cycles.GAP_S + 60)
     assert final_wash.pattern == grown.pattern
     assert next(p for p in cp.all() if p["id"] == grown.pattern)["n"] == 2
 
