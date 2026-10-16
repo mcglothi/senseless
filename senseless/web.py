@@ -14,9 +14,53 @@ from .appearance import Appearance, AppearanceError
 from .circuits import CircuitError, Circuits
 from .floorplans import FloorplanError, Floorplans, IMAGE_TYPES, MAX_IMAGE_BYTES
 from .history import History, HistoryError
+from .hunt import Hunt, HuntError
 from .state import CLOSE, LiveState
 
 LEGS = ("L1", "L2")
+
+# GET /api: what every endpoint does, so an agent (a voice assistant, a script) can drive the app.
+API_INDEX = [
+    {"method": "GET", "path": "/api/status", "does": "feed health, latest realtime update"},
+    {"method": "GET", "path": "/api/stream", "does": "server-sent events: snapshot, rt (live watts + steps), hunt (session changes), timeline events"},
+    {"method": "GET", "path": "/api/today", "does": "energy, cost and peak since midnight, hourly bars"},
+    {"method": "GET", "path": "/api/series?minutes=", "does": "per-second leg watts for charts"},
+    {"method": "GET", "path": "/api/deltas?minutes=", "does": "the monitor's on-board step detections"},
+    {"method": "GET", "path": "/api/readings?minutes=", "does": "raw stored readings"},
+    {"method": "GET", "path": "/api/baseline", "does": "measured always-on watts"},
+    {"method": "GET", "path": "/api/loads", "does": "load patterns (size, legs, runs, energy today, name, Sense hint)"},
+    {"method": "POST", "path": "/api/loads/{id}/name", "body": {"name": "str|null"}, "does": "name or unname a pattern"},
+    {"method": "POST", "path": "/api/loads/{id}/ignore", "body": {"ignored": "bool"}, "does": "hide a pattern from the inbox"},
+    {"method": "GET", "path": "/api/runs?minutes=", "does": "individual on/off runs for the timeline"},
+    {"method": "GET", "path": "/api/history?scale=day|week|month|year&date=", "does": "Sense cloud history and per-device breakdown"},
+    {"method": "GET", "path": "/api/hunt[?wait=version&timeout=s]", "does": "the hunt session; with wait, long-polls until it changes. Read `prompt` aloud, offer `actions`"},
+    {"method": "POST", "path": "/api/hunt/start", "body": {"mode": "breaker|device", "include_background": "bool?"}, "does": "start (or restart) a hunt; breaker: next breaker after a save. Device mode ignores small loads that cycle all day unless include_background"},
+    {"method": "POST", "path": "/api/hunt/save", "body": {"breaker": "str", "name": "str?"}, "does": "breaker mode: store the measured drop for this breaker"},
+    {"method": "POST", "path": "/api/hunt/label", "body": {"name": "str", "room_id": "int?"}, "does": "device mode: name the measured device's pattern; room_id also pins it on the Map"},
+    {"method": "POST", "path": "/api/hunt/retry", "does": "breaker: re-baseline; device: discard this measurement and wait for a fresh on"},
+    {"method": "POST", "path": "/api/hunt/stop", "does": "end the hunt"},
+    {"method": "GET", "path": "/api/circuits", "does": "mapped breakers"},
+    {"method": "POST", "path": "/api/circuits", "body": {"breaker": "str", "name": "str?", "l1_w": "num", "l2_w": "num"}, "does": "add a breaker by hand"},
+    {"method": "DELETE", "path": "/api/circuits/{id}", "does": "remove a mapped breaker"},
+    {"method": "GET", "path": "/api/floors", "does": "floors with rooms and markers (coordinates 0-1)"},
+    {"method": "POST", "path": "/api/floors", "body": {"name": "str"}, "does": "add a floor"},
+    {"method": "PATCH", "path": "/api/floors/{id}", "does": "rename / reorder a floor"},
+    {"method": "DELETE", "path": "/api/floors/{id}", "does": "delete a floor"},
+    {"method": "PUT", "path": "/api/floors/{id}/image", "does": "upload a plan image (raw body, header X-Senseless-Upload: 1)"},
+    {"method": "POST", "path": "/api/floors/{id}/rooms", "body": {"name": "str", "x": "0-1", "y": "0-1", "w": "0-1", "h": "0-1"}, "does": "add a room"},
+    {"method": "PATCH", "path": "/api/rooms/{id}", "does": "rename / move a room"},
+    {"method": "DELETE", "path": "/api/rooms/{id}", "does": "delete a room"},
+    {"method": "POST", "path": "/api/floors/{id}/markers", "body": {"kind": "load|sense|label", "ref": "str", "icon": "str", "x": "0-1", "y": "0-1"}, "does": "place a device marker"},
+    {"method": "PATCH", "path": "/api/markers/{id}", "does": "move / relabel a marker"},
+    {"method": "DELETE", "path": "/api/markers/{id}", "does": "remove a marker"},
+    {"method": "GET", "path": "/api/appearance", "does": "theme settings"},
+    {"method": "POST", "path": "/api/appearance", "does": "change theme settings"},
+    {"method": "GET", "path": "/api/themes", "does": "installed themes"},
+    {"method": "GET", "path": "/api/themes/gallery", "does": "base16 themes available to install"},
+    {"method": "POST", "path": "/api/themes/install", "body": {"id": "str"}, "does": "install a gallery theme"},
+    {"method": "DELETE", "path": "/api/themes/{id}", "does": "remove an installed theme"},
+    {"method": "GET", "path": "/api/floors/{id}/image", "does": "a floor's plan image"},
+]
 
 
 def _esc(s: str) -> str:
@@ -163,7 +207,7 @@ def _web_dir() -> Path | None:
 
 def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None,
              detector=None, circuits: Circuits | None = None, history: History | None = None,
-             floorplans: Floorplans | None = None) -> web.Application:
+             floorplans: Floorplans | None = None, hunt: Hunt | None = None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
@@ -237,7 +281,9 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
     def _snapshot():
         age = st.message_age()
         return {"healthy": st.healthy(), "connected": st.connected, "monitor_online": st.monitor_online,
-                "last_message_age_seconds": round(age, 1) if age is not None else None, "latest": st.latest}
+                "last_message_age_seconds": round(age, 1) if age is not None else None, "latest": st.latest,
+                # a reconnecting client may have missed hunt events: give it the current session
+                "hunt": hunt.view() if hunt is not None else None}
 
     # ── appearance (same contract as Docket's) ──────────────────────────────
     def _ap():
@@ -432,6 +478,97 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         except KeyError:
             raise web.HTTPNotFound(text="no such floor image") from None
 
+    # ── hunt (breaker / device), one shared session ─────────────────────────
+    def _hunt():
+        if hunt is None:
+            raise web.HTTPNotFound(text="hunt not running")
+        return hunt
+
+    async def _cmd(req):
+        """Hunt command body: JSON when there is one; an empty POST is fine (voice clients), but still same-origin."""
+        if req.can_read_body:
+            return await _body(req)
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        return {}
+
+    async def hunt_get(req):
+        """The session. ?wait=<version> long-polls until it changes (or ?timeout= seconds, max 55)."""
+        h = _hunt()
+        try:
+            wait = int(req.query["wait"]) if "wait" in req.query else None
+            timeout = min(55.0, max(0.0, float(req.query.get("timeout", 25))))
+        except ValueError:
+            return _bad("wait must be an integer version and timeout a number of seconds")
+        if wait is not None and h.version <= wait:
+            ev = asyncio.Event()
+            h.listeners.add(ev.set)
+            try:
+                await asyncio.wait_for(ev.wait(), timeout)
+            except TimeoutError:
+                pass
+            finally:
+                h.listeners.discard(ev.set)
+        return web.json_response(h.view())
+
+    def hunt_cmd(fn):
+        async def handler(req):
+            body = await _cmd(req)
+            try:
+                return web.json_response(await fn(_hunt(), body))
+            except (HuntError, CircuitError) as e:
+                return web.json_response({"error": str(e), "hunt": _hunt().view()}, status=409 if isinstance(e, HuntError) else 400)
+        return handler
+
+    async def _start(h, b):
+        return h.start(b.get("mode", "device"), include_background=bool(b.get("include_background", False)))
+
+    async def _save(h, b):
+        return {"saved": h.save(b.get("breaker"), b.get("name")), "hunt": h.view()}
+
+    def _place(name, room_id):
+        """Drop a marker for a just-labeled device into a Map room (centre, nudged off other markers)."""
+        fp = _fp()
+        for f in fp.all():
+            room = next((r for r in f["rooms"] if r["id"] == room_id), None)
+            if room is None:
+                continue
+            taken = sum(1 for m in f["markers"] if room["x"] <= m["x"] <= room["x"] + room["w"] and room["y"] <= m["y"] <= room["y"] + room["h"])
+            dx = (taken % 3 - 1) * room["w"] * 0.22
+            dy = ((taken // 3) % 3 - 1) * room["h"] * 0.22
+            return fp.add_marker(f["id"], {"kind": "load", "ref": name.strip()[:80], "icon": "plug",
+                                           "x": room["x"] + room["w"] / 2 + dx, "y": room["y"] + room["h"] / 2 + dy})
+        raise HuntError("no such room")
+
+    async def _label(h, b):
+        room = b.get("room_id")
+        if room is not None and (not isinstance(room, int) or isinstance(room, bool)):
+            raise HuntError("room_id must be an integer")
+        if room is not None:
+            fp = _fp()
+            if not any(r["id"] == room for f in await asyncio.to_thread(fp.all) for r in f["rooms"]):
+                raise HuntError("no such room")
+        out = h.label(b.get("name"))   # on the loop: it notifies listeners and SSE queues
+        if room is not None:
+            try:
+                out["marker"] = await asyncio.to_thread(_place, out["pattern"]["name"], room)
+            except FloorplanError as e:
+                out["marker_error"] = str(e)
+        out["hunt"] = h.view()
+        return out
+
+    async def _retry(h, _b):
+        return h.retry()
+
+    async def _stop(h, _b):
+        return h.stop()
+
+    async def api_index(_):
+        return web.json_response({"service": "senseless", "docs": "https://github.com/mcglothi/senseless/blob/main/notes/senseless-api.md",
+                                  "writes": "JSON bodies; requests from browsers must be same-origin. Errors are {\"error\": ...}.",
+                                  "endpoints": API_INDEX})
+
     # ── history (Sense cloud, cached) ───────────────────────────────────────
     async def history_get(req):
         if history is None:
@@ -467,6 +604,11 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.get("/api/circuits", circuits_get), web.post("/api/circuits", circuits_add),
         web.delete("/api/circuits/{id}", circuits_remove),
         web.get("/api/history", history_get),
+        web.get("/api", api_index),
+        web.get("/api/hunt", hunt_get),
+        web.post("/api/hunt/start", hunt_cmd(_start)), web.post("/api/hunt/save", hunt_cmd(_save)),
+        web.post("/api/hunt/label", hunt_cmd(_label)), web.post("/api/hunt/retry", hunt_cmd(_retry)),
+        web.post("/api/hunt/stop", hunt_cmd(_stop)),
         web.get("/api/floors", floorplan_handler("all")),
         web.post("/api/floors", floorplan_handler("add_floor", write=True)),
         web.patch("/api/floors/{id}", floorplan_handler("update_floor", write=True)),
@@ -492,9 +634,10 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
 
 async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None,
                 circuits: Circuits | None = None, history: History | None = None,
-                floorplans: Floorplans | None = None) -> web.AppRunner:
+                floorplans: Floorplans | None = None, hunt: Hunt | None = None) -> web.AppRunner:
     # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
-    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits, history=history, floorplans=floorplans),
+    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits, history=history, floorplans=floorplans,
+                                      hunt=hunt),
                              access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))

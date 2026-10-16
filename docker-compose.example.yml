@@ -1,7 +1,7 @@
 # Copy to docker-compose.yml, create .env with SENSE_EMAIL / SENSE_PASSWORD, then: docker compose up -d
 services:
   senseless:
-    image: ghcr.io/mcglothi/senseless:0.6.1
+    image: ghcr.io/mcglothi/senseless:0.7.0
     container_name: senseless
     restart: unless-stopped
     env_file: .env

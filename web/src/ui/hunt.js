@@ -1,40 +1,24 @@
-// Breaker Hunt math, pure so it's unit-tested (hunt.test.js).
-
-const avg = xs => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null)
-
-// Average per-leg power over readings [{t, l1, l2}] within the last `seconds`.
-export function legAverage(readings, seconds, now) {
-  const recent = readings.filter(r => r.t >= now - seconds && r.t <= now)  // ignore anything "from the future"
-  return { l1: avg(recent.map(r => r.l1)), l2: avg(recent.map(r => r.l2)), n: recent.length }
-}
-
-// What changed since the baseline: the monitor's own steps (exact, cycle-accurate) and the smoothed
-// leg-power change (fallback when steps were below the noise floor or missed).
-export function huntDrop(baseline, current, deltas) {
-  const since = deltas.filter(d => d.t > baseline.t)  // strictly after: a step that arrived with the baseline is part of it
-  const stepSum = leg => since.filter(d => d.leg === leg).reduce((a, d) => a + d.w, 0)
-  const steps = { l1: stepSum(1), l2: stepSum(2), count: since.length }
-  const change = {
-    l1: current.l1 != null && baseline.l1 != null ? current.l1 - baseline.l1 : null,
-    l2: current.l2 != null && baseline.l2 != null ? current.l2 - baseline.l2 : null,
-  }
-  // prefer steps when they explain most of the measured change (or the change is noise-level)
-  const pick = leg => {
-    const s = steps[leg], c = change[leg]
-    if (c == null) return s
-    if (Math.abs(c) < 15) return Math.abs(s) >= 15 ? s : 0
-    // steps only win when they point the same way as the measured change (a missed -1000 W breaker
-    // step plus a caught +400 W appliance start must not read as +400)
-    return Math.sign(s) === Math.sign(c) && Math.abs(s) >= Math.abs(c) * 0.6 ? s : c
-  }
-  const l1 = pick('l1'), l2 = pick('l2')
-  const both = Math.abs(l1) >= 100 && Math.abs(l2) >= 100 && Math.sign(l1) === Math.sign(l2) &&
-    Math.abs(Math.abs(l1) - Math.abs(l2)) / Math.max(Math.abs(l1), Math.abs(l2)) <= 0.25
-  return { l1, l2, total: l1 + l2, steps, change, both, meaningful: Math.abs(l1 + l2) >= 15 }
-}
+// Hunt helpers, pure so they're unit-tested (hunt.test.js). The measuring itself happens on the
+// server (senseless/hunt.py), so the app and a voice assistant share one session.
 
 // How much of the always-on baseline the mapped breakers account for (drops are negative watts).
 export function explained(circuits, alwaysOnW) {
   const mapped = circuits.reduce((a, c) => a - Math.min(0, c.l1_w) - Math.min(0, c.l2_w), 0)
   return { mapped, pct: alwaysOnW ? Math.min(100, Math.round((mapped / alwaysOnW) * 100)) : null }
+}
+
+// The newer of two hunt views (a fetch reply and a pushed event can arrive in either order). A new
+// server process (epoch) always wins: its versions start over.
+export function newerHunt(a, b) {
+  if (!a || !b) return a ?? b ?? null
+  if (a.epoch !== b.epoch) return a.epoch > b.epoch ? a : b
+  return b.version >= a.version ? b : a
+}
+
+// "8 s", "2 min 5 s", "1 h 12 min"
+export function fmtSecs(s) {
+  if (s == null) return '—'
+  if (s < 60) return `${Math.round(s)} s`
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 >= 1 ? ` ${Math.round(s % 60)} s` : ''}`
+  return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`
 }

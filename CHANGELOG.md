@@ -2,6 +2,23 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.7.0 (2026-10-16)
+
+### Added
+- **Device Hunt**: a Devices mode next to Breaker Hunt. Switch a device on and off; Senseless measures each
+  cycle (legs, size, multi-stage starts, on-time), checks the cycles agree, suggests names (existing names,
+  Sense's own guess, size-based ideas) and names the matching load pattern, creating it if the detector
+  hasn't seen that load yet. Optionally pins the device in a Map room. Frequent small background loads are
+  ignored by default.
+- **Hunt API** (`/api/hunt`, `start`, `save`, `label`, `retry`, `stop`): the hunt now runs server-side, so
+  a voice assistant can drive it. Each state carries a speakable `prompt` and the valid `actions`;
+  `?wait=<version>` long-polls for the next change, and changes stream as `hunt` events on `/api/stream`.
+- `GET /api`: a catalog of every endpoint, so agents can find their way around.
+
+### Changed
+- Breaker Hunt's measuring moved from the browser to the server (same math; the app is now a client of the
+  shared session).
+
 ## 0.6.1 (2026-10-16)
 
 ### Fixed
