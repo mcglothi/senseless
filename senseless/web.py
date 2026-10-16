@@ -30,10 +30,14 @@ API_INDEX = [
     {"method": "GET", "path": "/api/deltas?minutes=", "does": "the monitor's on-board step detections"},
     {"method": "GET", "path": "/api/readings?minutes=", "does": "raw stored readings"},
     {"method": "GET", "path": "/api/baseline", "does": "measured always-on watts"},
-    {"method": "GET", "path": "/api/loads", "does": "load patterns (size, legs, runs, energy today, name, Sense hint)"},
+    {"method": "GET", "path": "/api/loads", "does": "load patterns (size, legs, runs, energy today, name, Sense hint, part_of_cycles)"},
     {"method": "POST", "path": "/api/loads/{id}/name", "body": {"name": "str|null"}, "does": "name or unname a pattern"},
     {"method": "POST", "path": "/api/loads/{id}/ignore", "body": {"ignored": "bool"}, "does": "hide a pattern from the inbox"},
-    {"method": "GET", "path": "/api/runs?minutes=", "does": "individual on/off runs for the timeline"},
+    {"method": "GET", "path": "/api/runs?minutes=", "does": "individual on/off runs for the timeline, with cycle id or null"},
+    {"method": "GET", "path": "/api/cycles?minutes=", "does": "program activity cycles overlapping the window, with fingerprint, energy, pattern and name"},
+    {"method": "GET", "path": "/api/cycle-patterns", "does": "cycle patterns with today and 48-hour count, kWh, last seen and median duration"},
+    {"method": "POST", "path": "/api/cycle-patterns/{id}/name", "body": {"name": "str|null"}, "does": "name or unname a cycle pattern"},
+    {"method": "POST", "path": "/api/cycle-patterns/{id}/ignore", "body": {"ignored": "bool"}, "does": "hide a cycle pattern from the inbox"},
     {"method": "GET", "path": "/api/history?scale=day|week|month|year&date=", "does": "Sense cloud history and per-device breakdown"},
     {"method": "GET", "path": "/api/billing", "does": "tariff settings, available rate plans (with sources), current marginal rate"},
     {"method": "POST", "path": "/api/billing", "body": {"pack": "tariff pack id", "plan": "plan id (legacy cmp-* accepted)", "supply": "supply id or null", "supply_per_kwh": "num", "billing_day": "1-31", "tax_rate": "num", "tax_exempt_kwh": "num", "calibrate": "bool"}, "does": "change tariff settings"},
@@ -146,6 +150,12 @@ def render_metrics(st: LiveState, db_path: Path, detector=None) -> str:
           [({"load": k, "legs": v["legs"]}, v["running"]) for k, v in sorted(named.items())])
         m("senseless_load_energy_today_wh", "Energy of a named load since local midnight", "gauge",
           [({"load": k, "legs": v["legs"]}, round(v["wh"], 1)) for k, v in sorted(named.items())])
+        cycle_counts = {}
+        for p in detector.cycle_loads(summary.day_bounds()[0]):
+            if p["name"]:
+                cycle_counts[p["name"]] = cycle_counts.get(p["name"], 0) + p["cycles_today"]
+        m("senseless_cycles_today", "Named appliance cycles started since local midnight", "gauge",
+          [({"name": name}, n) for name, n in sorted(cycle_counts.items())])
     return "\n".join(out) + "\n"
 
 
@@ -420,6 +430,35 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             return web.json_response(_det().patterns.ignore(_pattern_id(req), bool(body.get("ignored", True))))
         except KeyError:
             raise web.HTTPNotFound(text="no such pattern")
+
+    async def cycles(req):
+        start, end = _window(req, 180, 48 * 60)
+        return web.json_response(_det().cycles_between(start, end))
+
+    async def cycle_patterns(_):
+        d = _det()
+        start, _end = summary.day_bounds()
+        return web.json_response({"computed_at": d.computed_at, "patterns": d.cycle_loads(start)})
+
+    async def cycle_name(req):
+        body = await _body(req)
+        name = body.get("name")
+        if name is not None and not isinstance(name, str):
+            return _bad("name must be a string or null")
+        try:
+            return web.json_response(_det().cycle_patterns.name(_pattern_id(req), name))
+        except KeyError:
+            raise web.HTTPNotFound(text="no such cycle pattern")
+
+    async def cycle_ignore(req):
+        body = await _body(req)
+        ignored = body.get("ignored", True)
+        if not isinstance(ignored, bool):
+            return _bad("ignored must be a boolean")
+        try:
+            return web.json_response(_det().cycle_patterns.ignore(_pattern_id(req), ignored))
+        except KeyError:
+            raise web.HTTPNotFound(text="no such cycle pattern")
 
     # ── breaker map (Breaker Hunt) ──────────────────────────────────────────
     def _circ():
@@ -791,6 +830,9 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.get("/api/appearance", appearance_get), web.post("/api/appearance", appearance_post),
         web.get("/api/loads", loads), web.get("/api/runs", runs),
         web.post("/api/loads/{id}/name", load_name), web.post("/api/loads/{id}/ignore", load_ignore),
+        web.get("/api/cycles", cycles), web.get("/api/cycle-patterns", cycle_patterns),
+        web.post("/api/cycle-patterns/{id}/name", cycle_name),
+        web.post("/api/cycle-patterns/{id}/ignore", cycle_ignore),
         web.get("/api/circuits", circuits_get), web.post("/api/circuits", circuits_add),
         web.delete("/api/circuits/{id}", circuits_remove),
         web.get("/api/history", history_get),
