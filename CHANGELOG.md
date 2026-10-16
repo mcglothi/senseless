@@ -2,6 +2,13 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.8.1 (2026-10-16)
+
+### Fixed
+- Bill: sales tax now matches a real CMP bill to the cent. Tax is 5.5% of the kWh above the 750 kWh
+  exemption at their per-kWh delivery and supply rates; the fixed charge isn't taxed (it was taxed pro rata).
+- Bill: the cycle start day accepts 29–31 (meter reads late in the month), clamped to short months.
+
 ## 0.8.0 (2026-10-16)
 
 ### Added

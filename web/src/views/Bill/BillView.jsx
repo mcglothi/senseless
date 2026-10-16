@@ -231,7 +231,7 @@ function Settings({ config, save }) {
           <input type="number" step="0.001" inputMode="decimal" value={num('supply_per_kwh', 100)} onChange={edit('supply_per_kwh')} onBlur={() => commit('supply_per_kwh', 100)} style={input} />
         </Field>
         <Field label="Cycle starts on day">
-          <input type="number" min="1" max="28" inputMode="numeric" value={num('billing_day')} onChange={edit('billing_day')} onBlur={() => commit('billing_day')} style={input} />
+          <input type="number" min="1" max="31" inputMode="numeric" value={num('billing_day')} onChange={edit('billing_day')} onBlur={() => commit('billing_day')} style={input} />
         </Field>
         <Field label="Sales tax %">
           <input type="number" step="0.1" inputMode="decimal" value={num('tax_rate', 100)} onChange={edit('tax_rate')} onBlur={() => commit('tax_rate', 100)} style={input} />

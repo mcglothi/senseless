@@ -18,15 +18,23 @@ def test_rate_a_matches_the_states_typical_bill():
     assert b["delivery"] == pytest.approx(500 * 0.119590, abs=0.01) and b["supply"] == pytest.approx(550 * 0.12721, abs=0.01)
 
 
+def test_matches_a_real_cmp_bill():
+    """A real 32-day CMP Rate A bill (Sept 2026): 1,350 kWh. Delivery $27.37 + 1,300 x $0.119590 + $3.95 tax
+    = $186.78; Standard Offer 1,350 x $0.127210 + $4.20 tax = $175.93; total $362.71. Tax is 5.5% of the
+    kWh above 750 at the per-kWh rates; the fixed charge isn't taxed."""
+    b = estimate(dict(DEFAULTS), 1350)
+    assert b["total"] == pytest.approx(362.71, abs=0.01)
+    assert b["tax"] == pytest.approx(3.95 + 4.20, abs=0.01)
+
+
 def test_tax_above_exempt_kwh_and_marginal_rate():
     s = dict(DEFAULTS)
     b = estimate(s, 1200)
     before = 27.37 + 1150 * 0.119590 + 1200 * 0.12721
-    assert b["tax"] == pytest.approx(before * (450 / 1200) * 0.055, abs=0.01)
+    assert b["tax"] == pytest.approx(450 * (0.119590 + 0.12721) * 0.055, abs=0.01)
     assert b["total"] == pytest.approx(before + b["tax"], abs=0.01)
-    # marginal = what the 1,201st kWh adds to this bill (its delivery+supply, taxed, plus the taxable share growing)
-    total = lambda k: (27.37 + (k - 50) * 0.119590 + k * 0.12721) * (1 + max(0, k - 750) / k * 0.055)
-    assert b["marginal_cents_per_kwh"] == pytest.approx((total(1201) - total(1200)) * 100, abs=0.01)
+    # above the exemption, one more kWh costs its delivery + supply, taxed
+    assert b["marginal_cents_per_kwh"] == pytest.approx((0.119590 + 0.12721) * 1.055 * 100, abs=0.01)
     assert estimate(s, 500)["marginal_cents_per_kwh"] == pytest.approx((0.119590 + 0.12721) * 100, abs=0.01)
     # inside the fixed charge's 50 kWh, another kWh only adds supply
     assert estimate(s, 10)["marginal_cents_per_kwh"] == pytest.approx(12.721, abs=0.01)
@@ -48,6 +56,10 @@ def test_cycle_bounds_and_peak_hours():
     assert cycle_bounds(1, date(2026, 10, 16)) == (date(2026, 10, 1), date(2026, 11, 1))
     assert cycle_bounds(20, date(2026, 10, 16)) == (date(2026, 9, 20), date(2026, 10, 20))
     assert cycle_bounds(20, date(2026, 12, 25)) == (date(2026, 12, 20), date(2027, 1, 20))
+    # a meter read on the 29th-31st: short months clamp
+    assert cycle_bounds(29, date(2026, 10, 16)) == (date(2026, 9, 29), date(2026, 10, 29))
+    assert cycle_bounds(31, date(2026, 2, 27)) == (date(2026, 1, 31), date(2026, 2, 28))
+    assert cycle_bounds(31, date(2026, 2, 28)) == (date(2026, 2, 28), date(2026, 3, 31))
     tou = {"start_hour": 17, "end_hour": 21, "weekdays_only": True}
     assert is_on_peak(datetime(2026, 10, 15, 18), tou) and not is_on_peak(datetime(2026, 10, 15, 21), tou)
     assert not is_on_peak(datetime(2026, 10, 17, 18), tou)   # Saturday
@@ -84,7 +96,7 @@ def test_cycle_projection_and_compare(tmp_path):
 def test_settings_validation(tmp_path):
     b = Billing(tmp_path / "s.db")
     assert b.settings()["plan"] == "cmp-a"
-    for bad in ({"plan": "x"}, {"billing_day": 29}, {"billing_day": 1.5}, {"tax_rate": -1}, {"supply_per_kwh": "1"},
+    for bad in ({"plan": "x"}, {"billing_day": 32}, {"billing_day": 1.5}, {"tax_rate": -1}, {"supply_per_kwh": "1"},
                 {"calibrate": 1}, {"nope": 1}, {"custom": {"fixed": -1}}, {"custom": {"other": 1}}, {"supplier": ""}):
         with pytest.raises(BillingError):
             b.update(bad)

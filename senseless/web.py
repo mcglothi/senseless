@@ -36,7 +36,7 @@ API_INDEX = [
     {"method": "GET", "path": "/api/runs?minutes=", "does": "individual on/off runs for the timeline"},
     {"method": "GET", "path": "/api/history?scale=day|week|month|year&date=", "does": "Sense cloud history and per-device breakdown"},
     {"method": "GET", "path": "/api/billing", "does": "tariff settings, available rate plans (with sources), current marginal rate"},
-    {"method": "POST", "path": "/api/billing", "body": {"plan": "cmp-a|cmp-a-tou|cmp-et|custom", "supply_per_kwh": "num", "billing_day": "1-28", "tax_rate": "num", "tax_exempt_kwh": "num", "calibrate": "bool"}, "does": "change tariff settings"},
+    {"method": "POST", "path": "/api/billing", "body": {"plan": "cmp-a|cmp-a-tou|cmp-et|custom", "supply_per_kwh": "num", "billing_day": "1-31", "tax_rate": "num", "tax_exempt_kwh": "num", "calibrate": "bool"}, "does": "change tariff settings"},
     {"method": "GET", "path": "/api/billing/cycle", "does": "this billing cycle: kWh so far, projected bill with fixed/delivery/supply/tax, other plans compared"},
     {"method": "GET", "path": "/api/billing/estimate?kwh=&on_peak_kwh=&plan=&months=", "does": "what a bill for that usage would be"},
     {"method": "GET", "path": "/api/billing/bills", "does": "bills you entered, each with the model's estimate and the difference"},
