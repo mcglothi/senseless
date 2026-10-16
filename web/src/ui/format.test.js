@@ -97,3 +97,16 @@ describe('themes', () => {
     expect(tokensFor(light).l1).toBe('#1d4ed8')
   })
 })
+
+describe('index.html', () => {
+  it('has no stray markup after the favicon (a leftover once rendered "> on every page)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const html = readFileSync(new URL('../../index.html', import.meta.url), 'utf8')
+    const head = html.slice(0, html.indexOf('</head>'))
+    const bodyStart = html.slice(html.indexOf('<body>'), html.indexOf('<script', html.indexOf('<body>')))
+    expect(bodyStart.replace(/<body>|\s/g, '')).toBe('')
+    const iconLine = head.split('\n').find(l => l.includes('rel="icon"'))
+    expect(iconLine.split('</svg>').length - 1).toBe(1)   // one inline icon, nothing trailing it
+    expect(iconLine.trim().endsWith('</svg>">')).toBe(true)
+  })
+})
