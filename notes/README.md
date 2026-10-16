@@ -11,6 +11,7 @@ What we know about the Sense energy monitor's software interfaces, written for b
 | [energy-providers.md](energy-providers.md) | Migration/compatibility notes and contributing an importer or tariff pack |
 | [billing-import-spec.md](billing-import-spec.md) | CMP PDF/hourly meter CSV import contract, privacy rules, billing insights and cycle adjustments |
 | [detection.md](detection.md) | Load detection: steps, runs, persistent patterns, naming hints and limits |
+| [property-spec.md](property-spec.md) | Property map: buildings, floors with levels, site plan, API |
 | [cycles.md](cycles.md) | Program activity cycles: detection rules, persistent cycle patterns, replay results and limits |
 | [findings.md](findings.md) | Dated observations from real hardware, incl. a labeled microwave signature |
 | [methodology.md](methodology.md) | How it was reverse-engineered, so you can redo it on a new app version |
