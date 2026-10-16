@@ -130,6 +130,12 @@ tick();setInterval(tick,3000);
 </script></body></html>"""
 
 
+def _static_file(path: Path):
+    async def handler(_req):
+        return web.FileResponse(path, headers={"Cache-Control": "max-age=86400"})
+    return handler
+
+
 def _web_dir() -> Path | None:
     """The built frontend (web/dist). Docker copies it to /app/web; locally it's the repo's web/dist."""
     for d in (os.environ.get("SENSELESS_WEB_DIR"), Path(__file__).resolve().parent.parent / "web" / "dist"):
@@ -368,7 +374,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         # installable app (PWA): manifest + icons from web/public
         for name in ("manifest.webmanifest", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"):
             if (web_dir / name).exists():
-                app.router.add_get(f"/{name}", lambda _req, f=web_dir / name: web.FileResponse(f, headers={"Cache-Control": "max-age=86400"}))
+                app.router.add_get(f"/{name}", _static_file(web_dir / name))
     return app
 
 
