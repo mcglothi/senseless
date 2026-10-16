@@ -2,6 +2,22 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.12.0 (2026-10-16)
+
+### Added
+- **Motor loads get real runs.** Pumps, compressors and fans draw a start-up surge, so their switch-on looked bigger
+  than their switch-off and the two never paired (no runtime, no energy). A run is now sized by the power the leg
+  settles at a few seconds after the switch, with the surge kept as `inrush_w`; patterns group by running level, and
+  existing names follow their appliance. Replayed on real data: a pool pump that showed as an unmatched 2.2 kW
+  start is one 08:31-14:28 run at 0.9 kW (5.4 kWh); a well pump goes from an unmatched 1.7 kW start to a closed
+  0.8 kW run.
+- **Shared switch-offs**: when a timer or power strip turns several loads off at once, one switch-off can close
+  two runs that started within 10 minutes of each other (`closed_by: "shared-off"`).
+
+### Changed
+- "Was it still running?" checks are now relative to the leg's level just before a run started, with slack that
+  scales with the load, so a later unrelated switch-off can't close an old run while other loads keep the leg busy.
+
 ## 0.11.2 (2026-10-16)
 
 ### Fixed
