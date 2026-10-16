@@ -193,3 +193,28 @@ def test_shutdown_is_prompt_with_an_open_stream(tmp_path, monkeypatch):
             await runner.cleanup()
             return time.monotonic() - t0
     assert asyncio.run(run()) < 2.0
+
+
+def test_series_and_deltas_accept_windows(tmp_path):
+    s = Store(tmp_path / "t.db")
+    t0 = 1_800_000_000.0
+    for i in range(120):  # 2 minutes at 1 Hz, with a 5 kW spike at 60 s
+        w = 5000.0 if i == 60 else 1000.0
+        s.realtime({"frame": 1000 + i * 60, "epoch": t0 + i, "w": w, "channels": [w / 2, w / 2], "voltage": [120, 120], "hz": 60,
+                    "deltas": [{"start_frame": 1000 + i * 60, "frame": 1000 + i * 60, "channel": 0, "w": 40}] if i % 30 == 0 else []}, t0 + i)
+    s.close()
+
+    async def run():
+        app = web.make_app(LiveState(), tmp_path / "t.db")
+        async with TestClient(TestServer(app)) as c:
+            rows = await (await c.get(f"/api/series?start={t0}&end={t0 + 120}&bucket=60")).json()
+            assert [r["t"] for r in rows] == [t0, t0 + 60]
+            assert rows[1]["w_max"] == 5000 and rows[1]["w"] < 2000   # spike survives the bucket average
+            d = await (await c.get(f"/api/deltas?start={t0}&end={t0 + 61}")).json()
+            assert len(d) == 3                                          # i = 0, 30, 60
+            assert (await c.get("/api/series?start=abc")).status == 400
+            assert (await c.get(f"/api/series?start={t0 + 10}&end={t0}")).status == 400
+            # a huge window with a tiny bucket is coarsened to stay chart-sized
+            rows = await (await c.get(f"/api/series?start={t0 - 86400}&end={t0 + 120}&bucket=1")).json()
+            assert len(rows) <= 5000
+    asyncio.run(run())
