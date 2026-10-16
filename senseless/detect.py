@@ -286,12 +286,19 @@ def load_sense_ons(db_path: Path, since_ts: float) -> list[dict]:
                           "ORDER BY device_id, ts", (since_ts,)).fetchall()
     finally:
         db.close()
+    ON_W = 20.0
     ons, prev = [], {}
     for i, (ts, dev, name, w) in enumerate(rows):
         w = w or 0.0
         p = prev.get(dev, 0.0)
-        if w >= 20 and p < 10:  # was off; Sense's estimate ramping up (203 -> 298 -> 1700) is one turn-on
-            peak = max((r[3] or 0) for r in rows[i:i + 20] if r[1] == dev and r[0] <= ts + 30)
+        # a crossing of ON_W from below is one turn-on; Sense ramping its estimate (203 -> 298 -> 1700)
+        # or creeping up (0 -> 15 -> 100) still counts once
+        if w >= ON_W and p < ON_W:
+            peak = w
+            for r in rows[i + 1:i + 40]:
+                if r[1] != dev or r[0] > ts + 30 or (r[3] or 0) < ON_W:
+                    break  # stop at the next device, after 30 s, or when it turns off (no next activation)
+                peak = max(peak, r[3] or 0)
             ons.append({"ts": ts, "name": name, "w": peak})
         prev[dev] = w
     return ons
@@ -305,16 +312,20 @@ def sense_hints(runs: list[Run], ons: list[dict], min_share: float = 0.4, min_ma
     from bisect import bisect_left
     votes: dict[int, dict[str, int]] = {}
     totals: dict[int, int] = {}
-    for r in runs:
+    used: set[int] = set()   # each Sense turn-on corroborates at most one run (the nearest)
+    for r in sorted(runs, key=lambda r: r.start_ts):
         totals[r.pattern] = totals.get(r.pattern, 0) + 1
         i = bisect_left(times, r.start_ts - 10)
-        names = set()
+        best: dict[str, tuple] = {}
         while i < len(ons) and ons[i]["ts"] <= r.start_ts + 30:
             o = ons[i]
-            if abs(o["w"] - r.w) <= 0.4 * max(r.w, o["w"]):
-                names.add(o["name"])
+            if i not in used and abs(o["w"] - r.w) <= 0.4 * max(r.w, o["w"]):
+                gap = abs(o["ts"] - r.start_ts)
+                if o["name"] not in best or gap < best[o["name"]][0]:
+                    best[o["name"]] = (gap, i)
             i += 1
-        for n in names:
+        for n, (_, idx) in best.items():
+            used.add(idx)
             votes.setdefault(r.pattern, {})[n] = votes.setdefault(r.pattern, {}).get(n, 0) + 1
     hints = {}
     for pid, v in votes.items():

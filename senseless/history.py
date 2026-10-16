@@ -11,6 +11,7 @@ local noon of the asked date.
 import json
 import re
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, time as dtime, timedelta, timezone
@@ -37,6 +38,15 @@ def period_key(scale: str, d: date) -> str:
 
 def period_contains_today(scale: str, d: date, today: date) -> bool:
     return period_key(scale, d) == period_key(scale, today)
+
+
+def period_end(scale: str, d: date) -> date:
+    """First day after the period containing d."""
+    if scale == "day":
+        return d + timedelta(days=1)
+    if scale == "month":
+        return (d.replace(day=1) + timedelta(days=32)).replace(day=1)
+    return date(d.year + 1, 1, 1)
 
 
 def ttl_for(scale: str, d: date, today: date) -> float | None:
@@ -72,6 +82,9 @@ class History:
         self.db_path = settings_db
         self.session = session_getter
         self.fetch = fetch or self._fetch_sense
+        self._locks: dict[tuple, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+        self._failed: dict[tuple, float] = {}   # (scale, period) -> time of last failed fetch
         with self._conn() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS history_cache (
                 scale TEXT NOT NULL, period TEXT NOT NULL, fetched_at REAL NOT NULL, body TEXT NOT NULL,
@@ -89,11 +102,11 @@ class History:
     def _fetch_sense(self, scale: str, d: date) -> dict:
         noon = datetime.combine(d, dtime(12, 0), tzinfo=local_tz()).astimezone(timezone.utc)
         params = {"scale": SCALES[scale], "start": noon.strftime("%Y-%m-%dT%H:%M:%S.000Z")}
+        s = self.session() or auth.session()
         for attempt in (0, 1):
-            s = self.session() or auth.session()
             r = requests.get(f"{auth.API}/app/monitors/{s.monitor_id}/history/usage", params=params, headers=s.headers(), timeout=20)
             if r.status_code in (401, 403) and attempt == 0:
-                auth.session(fresh=True)
+                s = auth.session(fresh=True)   # retry with the new token, not the rejected one
                 continue
             r.raise_for_status()
             return r.json()
@@ -112,17 +125,33 @@ class History:
         if d > today:
             raise HistoryError("that's in the future")
         key = period_key(scale, d)
+        with self._locks_guard:
+            lock = self._locks.setdefault((scale, key), threading.Lock())
+        with lock:  # one fetch per period at a time: concurrent misses wait and then hit the cache
+            return self._get_locked(scale, d, key, today)
+
+    def _get_locked(self, scale: str, d: date, key: str, today: date) -> dict:
         with self._conn() as db:
             row = db.execute("SELECT fetched_at, body FROM history_cache WHERE scale=? AND period=?", (scale, key)).fetchone()
-        ttl = ttl_for(scale, d, today)
-        if row and (ttl is None or time.time() - row[0] < ttl):
-            return {**json.loads(row[1]), "cached": True, "period": key}
+        if row:
+            cached = json.loads(row[1])
+            # forever only if the period had ended (plus a day to settle) when it was fetched; a
+            # partial October fetched mid-month must not be served in December
+            ttl = None if cached.get("_complete") else (ttl_for(scale, d, today) or RECENT_TTL_S)
+            if ttl is None or time.time() - row[0] < ttl:
+                return {**cached, "cached": True, "period": key}
+        failed = self._failed.get((scale, key))
+        if row and failed and time.time() - failed < 60:  # Sense just failed: don't hammer it
+            return {**json.loads(row[1]), "cached": True, "stale": True, "period": key}
         try:
             body = trim(scale, self.fetch(scale, d))
         except Exception as e:
+            self._failed[(scale, key)] = time.time()
             if row:  # Sense unreachable: serve the stale copy rather than nothing
                 return {**json.loads(row[1]), "cached": True, "stale": True, "period": key}
             raise HistoryError(f"couldn't fetch history from Sense ({type(e).__name__})")
+        self._failed.pop((scale, key), None)
+        body["_complete"] = today >= period_end(scale, d) + timedelta(days=1)
         with self._conn() as db:
             db.execute("INSERT OR REPLACE INTO history_cache VALUES (?,?,?,?)", (scale, key, time.time(), json.dumps(body)))
         return {**body, "cached": False, "period": key}

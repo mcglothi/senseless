@@ -23,6 +23,9 @@ export function periodStart(dateStr, scale) {
 // Is there a later period with data yet? (the next period must have started by today)
 export const hasNext = (dateStr, scale, today) => periodStart(shift(dateStr, scale, 1), scale) <= today
 
+// The date "next" moves to: one period on, but never past today (the backend refuses future dates).
+export const nextDate = (dateStr, scale, today) => { const n = shift(dateStr, scale, 1); return n > today ? today : n }
+
 export const daysIn = d => new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
 
 // Calendar grid for a month: leading blanks so day 1 lands on its weekday (Sunday first).
@@ -44,7 +47,9 @@ export function periodLabel(dateStr, scale) {
 // Fair comparison with the previous period: only as many buckets as the current one has so far.
 export function compareSoFar(cur, prev) {
   if (!cur?.kwh?.length || !prev?.kwh?.length) return null
-  const n = cur.kwh.filter(x => x != null && x > 0).length
+  // elapsed buckets: up to the last one with data (a zero-use bucket in between still counts)
+  let n = 0
+  cur.kwh.forEach((x, i) => { if (x != null && x > 0) n = i + 1 })
   if (!n) return null
   const sum = xs => xs.slice(0, n).reduce((a, b) => a + (b ?? 0), 0)
   const a = sum(cur.kwh), b = sum(prev.kwh)

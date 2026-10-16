@@ -3,7 +3,7 @@ import { C, MONO, alpha, useTheme } from '../../ui/theme'
 import { SectionTitle, Empty } from '../../ui/primitives'
 import { api, busyTyping } from '../../api/api'
 import { fmtInt } from '../../ui/format'
-import { compareSoFar, hasNext, monthGrid, parse, periodLabel, shift, todayIso } from '../../ui/history'
+import { compareSoFar, hasNext, monthGrid, nextDate, parse, periodLabel, shift, todayIso } from '../../ui/history'
 
 // History: days, months and years of energy and cost from Sense's own cloud history
 // (Senseless only has its own readings since it started). Click to drill down.
@@ -120,7 +120,7 @@ export function HistoryView() {
     const onKey = e => {
       if (busyTyping() || e.metaKey || e.ctrlKey || e.altKey) return
       if (e.key === 'ArrowLeft') setDate(d => shift(d, scale, -1))
-      else if (e.key === 'ArrowRight' && !atNow) setDate(d => shift(d, scale, 1))
+      else if (e.key === 'ArrowRight' && !atNow) setDate(d => nextDate(d, scale, todayIso()))
       else return
       e.preventDefault()
     }
@@ -145,7 +145,7 @@ export function HistoryView() {
         <span style={{ flex: 1 }} />
         <div style={{ display: 'flex', gap: 4, padding: 4, border: `1px solid ${C.line}`, borderRadius: 10, background: C.panel }}>
           <button type="button" onClick={() => setDate(d => shift(d, scale, -1))} aria-label="Previous (←)" style={chip(false)}>←</button>
-          <button type="button" onClick={() => setDate(d => shift(d, scale, 1))} aria-label="Next (→)" disabled={atNow} style={{ ...chip(false), opacity: atNow ? 0.4 : 1 }}>→</button>
+          <button type="button" onClick={() => setDate(d => nextDate(d, scale, todayIso()))} aria-label="Next (→)" disabled={atNow} style={{ ...chip(false), opacity: atNow ? 0.4 : 1 }}>→</button>
           <button type="button" onClick={() => setDate(todayIso())} style={chip(false)}>Today</button>
         </div>
         <div role="group" aria-label="Scale" style={{ display: 'flex', gap: 4, padding: 4, border: `1px solid ${C.line}`, borderRadius: 10, background: C.panel }}>

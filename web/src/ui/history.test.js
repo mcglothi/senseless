@@ -30,3 +30,14 @@ describe('history helpers', () => {
     expect(compareSoFar({ kwh: [0, 0] }, prev)).toBeNull()
   })
 })
+
+describe('history regressions', () => {
+  it('never navigates past today', async () => {
+    const { nextDate } = await import('./history')
+    expect(nextDate('2026-09-20', 'month', '2026-10-16')).toBe('2026-10-16')
+    expect(nextDate('2026-08-10', 'month', '2026-10-16')).toBe('2026-09-10')
+  })
+  it('counts a zero-use bucket inside the elapsed period', () => {
+    expect(compareSoFar({ kwh: [10, 0, 20] }, { kwh: [10, 10, 10] })).toMatchObject({ buckets: 3, pct: 0 })
+  })
+})

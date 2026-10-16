@@ -72,3 +72,68 @@ def test_history_endpoint(tmp_path):
             assert (await c.get("/api/history?scale=hour&date=2026-07-04")).status == 400
             assert (await c.get("/api/history?scale=day&date=9999-01-01")).status == 400
     asyncio.run(run())
+
+
+def test_partial_period_is_not_cached_forever(tmp_path):
+    import sqlite3
+    calls = []
+    h = History(tmp_path / "s.db", lambda: None, fetch=lambda s, d: calls.append(1) or RAW)
+    h.get("month", "2026-10-10", today=date(2026, 10, 16))        # October, mid-month
+    with sqlite3.connect(tmp_path / "s.db") as db:
+        db.execute("UPDATE history_cache SET fetched_at = fetched_at - 86400")
+    h.get("month", "2026-10-10", today=date(2026, 12, 20))        # viewed in December
+    assert len(calls) == 2                                        # refetched, not served partial forever
+    h.get("month", "2026-10-10", today=date(2026, 12, 20))
+    with sqlite3.connect(tmp_path / "s.db") as db:
+        db.execute("UPDATE history_cache SET fetched_at = fetched_at - 30 * 86400")
+    h.get("month", "2026-10-10", today=date(2026, 12, 20))
+    assert len(calls) == 2                                        # complete now: cached for good
+
+
+def test_concurrent_misses_fetch_once(tmp_path):
+    import threading, time as _t
+    calls = []
+
+    def slow(scale, d):
+        calls.append(1)
+        _t.sleep(0.2)
+        return RAW
+
+    h = History(tmp_path / "s.db", lambda: None, fetch=slow)
+    ts = [threading.Thread(target=h.get, args=("month", "2026-07-04"), kwargs={"today": date(2026, 10, 16)}) for _ in range(4)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(calls) == 1
+
+
+def test_retry_after_401_uses_the_new_token(tmp_path, monkeypatch):
+    from senseless import history as hist, auth
+
+    class S:
+        def __init__(self, tok):
+            self.access_token, self.monitor_id = tok, 1
+
+        def headers(self):
+            return {"Authorization": f"bearer {self.access_token}"}
+
+    seen = []
+
+    class R:
+        def __init__(self, code):
+            self.status_code = code
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return RAW
+
+    def fake_get(url, params, headers, timeout):
+        seen.append(headers["Authorization"])
+        return R(401 if len(seen) == 1 else 200)
+
+    monkeypatch.setattr(hist.requests, "get", fake_get)
+    monkeypatch.setattr(auth, "session", lambda fresh=False: S("new"))
+    h = History(tmp_path / "s.db", lambda: S("old"))
+    h._fetch_sense("month", date(2026, 7, 4))
+    assert seen == ["bearer old", "bearer new"]
