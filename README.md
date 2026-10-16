@@ -44,6 +44,10 @@ The hunt runs on the server, so a voice assistant can drive the same session thr
 
 *Breakers or Devices: live leg readings and a guided measure → name flow.*
 
+### Cycles
+
+Some appliances don't switch on and off cleanly: a washer agitates and spins for 45 minutes, a dishwasher pumps and heats. Senseless groups each program into a single cycle with its length and energy, learns which cycles look alike, and lets you name them once ("Washer"), so the loads inbox isn't buried in fragments.
+
 ### Map
 
 The map starts with your whole property: the house, the detached garage, the pool house, the greenhouse, the shed. Upload a site plan (an aerial screenshot, a survey, or a sketch of the lot) and draw each building where it sits; every building shows its live load and today's energy, glowing when something big is running. Without a site plan, buildings show as live tiles. Click a building to zoom into it: its floors are stacked by level (basement, ground, upstairs, attic), each with its own plan, rooms and devices. The list view is an outline of everything, building by floor by room, with live totals.

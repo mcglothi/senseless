@@ -66,3 +66,16 @@ describe('loads helpers', () => {
     expect(matchStep(ps, { leg: 1, w: 1217 }, true)).toBeNull()
   })
 })
+
+describe('cycles', () => {
+  it('keeps program fragments out of the inbox', async () => {
+    const { inboxOf } = await import('./loads')
+    const ps = [{ id: 1, legs: 'L1', runs_window: 9, center_w: 300 }, { id: 2, legs: 'L1', runs_window: 9, center_w: 400, part_of_cycles: true }]
+    expect(inboxOf(ps).map(p => p.id)).toEqual([1])
+  })
+  it('suggests names for cycles', async () => {
+    const { cycleIdeas } = await import('./loads')
+    expect(cycleIdeas({ legs: 'L1', median_duration_s: 2760 }, { has_heat: false })[0]).toBe('Washer')
+    expect(cycleIdeas({ legs: 'L1', median_duration_s: 5400 }, { has_heat: true })[0]).toBe('Dishwasher')
+  })
+})

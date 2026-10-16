@@ -82,6 +82,15 @@ export function existingNames(patterns, p, max = 2, tol = 0.35) {
 // first (one-tap wins), then most energy over the 48 h window (today's is ~0 just after midnight).
 export function inboxOf(patterns, minRuns = 3) {
   return patterns
-    .filter(p => !p.name && !p.ignored && (p.runs_window >= minRuns || (p.legs === 'both' && p.runs_window >= 1)))
+    // fragments of a washer/dishwasher program belong to its cycle (Loads > Cycles), not the inbox
+    .filter(p => !p.name && !p.ignored && !p.part_of_cycles && (p.runs_window >= minRuns || (p.legs === 'both' && p.runs_window >= 1)))
     .sort((a, b) => (b.sense_hint ? 1 : 0) - (a.sense_hint ? 1 : 0) || (b.wh_window ?? b.wh_today) - (a.wh_window ?? a.wh_today) || b.runs_window - a.runs_window)
+}
+
+// Naming ideas for a program cycle, from legs, heating and length.
+export function cycleIdeas(p, last) {
+  const heat = last?.has_heat, mins = (p.median_duration_s ?? p.duration_s ?? 0) / 60
+  if (p.legs === 'both') return heat ? ['Dryer', 'Electric range', 'Heat pump'] : ['Well pump', 'Heat pump', 'Dryer']
+  if (heat) return ['Dishwasher', 'Washer (hot wash)', 'Coffee maker']
+  return mins >= 25 ? ['Washer', 'Dishwasher', 'Dehumidifier'] : ['Washer (quick)', 'Sump pump', 'Bread maker']
 }
