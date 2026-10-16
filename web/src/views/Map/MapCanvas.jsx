@@ -147,6 +147,7 @@ export function MapCanvas({ floor, rollup, stateOf, nameOf, edit, tool, placing,
   const start = (e, g) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    if (gesture.current?.type === 'pinch' || pointers.current.size > 2) return   // extra fingers during a pinch start nothing
     if (pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()]
       gesture.current = { type: 'pinch', d: Math.hypot(a.x - b.x, a.y - b.y), mid: local((a.x + b.x) / 2, (a.y + b.y) / 2) }
