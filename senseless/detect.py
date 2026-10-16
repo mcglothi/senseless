@@ -10,7 +10,8 @@ Pipeline, recomputed over a sliding window (cheap: a few thousand deltas a day):
    within PAIR_TOL), unless sustained leg power disproves it. Missed offs become unresolved.
 4. **Patterns**: runs are grouped by legs + stage count + size; a run joins the nearest known
    pattern centre within CLUSTER_TOL, else starts a new one. Patterns and their names persist in
-   settings.db, so names survive recomputes and restarts.
+   settings.db, so names survive recomputes and restarts. Extreme duration outliers in well-sampled,
+   unnamed patterns become unresolved.
 """
 
 import json
@@ -55,8 +56,8 @@ class Run:
     end_ts: float | None = None
     off_w: float | None = None
     pattern: int | None = None
-    # closed: off seen. running: no off yet, still plausible for its pattern. unresolved: no off and
-    # older than its pattern ever runs (the off was missed: Sense's on/off steps aren't always symmetric).
+    # closed: off seen. running: no off yet, still plausible for its pattern. unresolved: no reliable
+    # off (missed off or implausible pairing: Sense's on/off steps aren't always symmetric).
     status: str = "closed"
     generation: int = 0
 
@@ -251,6 +252,41 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
             if r.running and power.contradicts(r, end):
                 r.status = "unresolved"
     return runs
+
+
+def resolve_closed_runs(runs: list[Run], now_ts: float, named: set[int]) -> None:
+    """Discard extreme duration mis-pairs using only their own pattern's closed peers.
+
+    Require at least eight closed examples including the candidate, and exceed BOTH
+    20x the peer median and 4x the peer nearest-rank 95th percentile. Leaving the
+    candidate out prevents it from inflating its own tail threshold in small samples.
+    Named patterns are exempt. Repeat until stable: rejected pairs no longer pollute
+    the next pass, and every pass either removes a closure or terminates.
+    """
+    while True:
+        by_pattern: dict[int, list[Run]] = {}
+        for r in runs:
+            if r.status == "closed" and r.pattern is not None and r.pattern not in named:
+                by_pattern.setdefault(r.pattern, []).append(r)
+        rejected = []
+        for rs in by_pattern.values():
+            if len(rs) < 8:
+                continue
+            rs.sort(key=lambda r: r.duration_s(now_ts))
+            ds = [r.duration_s(now_ts) for r in rs]
+            peers = len(ds) - 1
+            for i, r in enumerate(rs):
+                # Index into the sorted peers without copying the list for every run.
+                mid, tail = peers // 2, math.ceil(.95 * peers) - 1
+                median = ds[mid + (mid >= i)]
+                p95 = ds[tail + (tail >= i)]
+                if ds[i] > max(20 * median, 4 * p95):
+                    rejected.append(r)
+        if not rejected:
+            return
+        for r in rejected:
+            r.end_frame = r.end_ts = r.off_w = None
+            r.status = "unresolved"
 
 
 def resolve_open_runs(runs: list[Run], now_ts: float, min_s: float = 600, factor: float = 3) -> None:
@@ -504,6 +540,7 @@ class Detector:
         since = now_ts - WINDOW_S
         runs = detect_runs(load_deltas(self.deltas_db, since), now_ts, load_readings(self.deltas_db, since))
         self.patterns.assign(runs)
+        resolve_closed_runs(runs, now_ts, {p["id"] for p in self.patterns.all() if p["name"]})
         resolve_open_runs(runs, now_ts)
         try:
             self.hints = sense_hints(runs, load_sense_ons(self.deltas_db, now_ts - WINDOW_S))
