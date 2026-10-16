@@ -68,19 +68,20 @@ export function groupNamed(patterns) {
 }
 
 // Names already used for loads on the same legs: offered first, so a split device gets one name.
-export function existingNames(patterns, p, max = 2) {
+export function existingNames(patterns, p, max = 2, tol = 0.35) {
   const seen = new Set()
   return patterns
-    .filter(x => x.name && x.legs === p.legs && x.id !== p.id)
+    .filter(x => x.name && x.legs === p.legs && x.id !== p.id && Math.abs(x.center_w - p.center_w) <= tol * Math.max(x.center_w, p.center_w))
     .sort((a, b) => Math.abs(a.center_w - p.center_w) - Math.abs(b.center_w - p.center_w))
     .map(x => x.name)
     .filter(n => !seen.has(n.toLowerCase()) && seen.add(n.toLowerCase()))
     .slice(0, max)
 }
 
-// Inbox: unnamed, not ignored, repeated enough to be worth naming. Most energy first.
+// Inbox: unnamed, not ignored, repeated enough to be worth naming. Patterns Sense has a hint for
+// first (one-tap wins), then most energy over the 48 h window (today's is ~0 just after midnight).
 export function inboxOf(patterns, minRuns = 3) {
   return patterns
     .filter(p => !p.name && !p.ignored && (p.runs_window >= minRuns || (p.legs === 'both' && p.runs_window >= 1)))
-    .sort((a, b) => b.wh_today - a.wh_today || b.runs_window - a.runs_window)
+    .sort((a, b) => (b.sense_hint ? 1 : 0) - (a.sense_hint ? 1 : 0) || (b.wh_window ?? b.wh_today) - (a.wh_window ?? a.wh_today) || b.runs_window - a.runs_window)
 }

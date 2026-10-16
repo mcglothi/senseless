@@ -63,6 +63,14 @@ function InboxCard({ p, focused, onFocus, onName, onIgnore, inputRef, known = []
               flex: '1 1 140px', minWidth: 0, height: 34, background: C.panel, border: `1px solid ${C.line2}`, borderRadius: 8,
               color: C.text, fontFamily: MONO, fontSize: 12, padding: '0 10px', outline: 'none',
             }} />
+          {p.sense_hint && !known.some(k => k.toLowerCase() === p.sense_hint.name.toLowerCase()) && (
+            <button type="button" onClick={() => submit(p.sense_hint.name)}
+              title={`Sense's own detection turned "${p.sense_hint.name}" on at the same moment in ${p.sense_hint.matches} of these runs`}
+              style={{ cursor: 'pointer', minHeight: 32, fontFamily: MONO, fontSize: 11, padding: '4px 10px', borderRadius: 16,
+                color: C.green, background: alpha(C.green, '10'), border: `1px solid ${alpha(C.green, '50')}` }}>
+              Sense: {p.sense_hint.name} · {Math.round(p.sense_hint.share * 100)}%
+            </button>
+          )}
           {known.map(n => (
             <button key={`k-${n}`} type="button" onClick={() => submit(n)} title="Already a named load on these legs" style={{
               cursor: 'pointer', minHeight: 32, fontFamily: MONO, fontSize: 11, padding: '4px 10px', borderRadius: 16,

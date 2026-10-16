@@ -39,6 +39,8 @@ describe('loads helpers', () => {
     const ps = [mw, { ...mw, id: 2, name: 'Kettle' }, { ...mw, id: 3, ignored: 1 }, { ...mw, id: 4, runs_window: 1 },
       { id: 5, legs: 'both', center_w: 2449, runs_window: 1, wh_today: 100 }]
     expect(inboxOf(ps).map(p => p.id)).toEqual([5, 1])
+    const hinted = [{ ...mw, id: 6, wh_window: 1 }, { ...mw, id: 7, wh_window: 999 }, { ...mw, id: 8, wh_window: 5, sense_hint: { name: 'Fridge' } }]
+    expect(inboxOf(hinted).map(p => p.id)).toEqual([8, 7, 6])
   })
   it('groups patterns that share a name and sums their stats', () => {
     const ps = [{ id: 1, name: 'Relay', legs: 'L1', center_w: 47, runs_window: 37, wh_today: 151, running: false },
@@ -53,6 +55,7 @@ describe('loads helpers', () => {
     const ps = [{ id: 1, name: 'Relay', legs: 'L1', center_w: 47 }, { id: 2, name: 'Lamp', legs: 'L1', center_w: 60 },
       { id: 3, name: 'Kettle', legs: 'L2', center_w: 56 }, { id: 4, name: 'relay', legs: 'L1', center_w: 45 }]
     expect(existingNames(ps, { id: 9, legs: 'L1', center_w: 56 })).toEqual(['Lamp', 'Relay'])
+    expect(existingNames(ps, { id: 9, legs: 'L1', center_w: 110 })).toEqual([])   // 47-60 W names don't fit a 110 W load
   })
   it('matches a step to the nearest pattern on the same legs', () => {
     const ps = [{ id: 1, legs: 'L2', center_w: 45 }, { id: 2, legs: 'L1', center_w: 45 }, { id: 3, legs: 'both', center_w: 2449 }]

@@ -240,3 +240,28 @@ def test_runs_between_is_strict_at_the_window_start(tmp_path):
                 Run(0, 150.0, "L2", 300.0, [(0, 300.0)], status="unresolved")]
     got = [(r["start_ts"], r["status"]) for r in det.runs_between(100, 200)]
     assert got == [(90.0, "closed"), (150.0, "unresolved")]
+
+
+def test_sense_hints_from_coinciding_turn_ons():
+    from senseless.detect import Run, sense_hints
+    runs = [Run(0, t, "L2", 480.0, [(0, 480.0)], pattern=7) for t in (100.0, 5000.0, 9000.0)] + \
+           [Run(0, 300.0, "L1", 55.0, [(0, 55.0)], pattern=8), Run(0, 700.0, "L1", 55.0, [(0, 55.0)], pattern=8)]
+    ons = [{"ts": 104.0, "name": "Water dispenser", "w": 477.0},      # Sense lags a few seconds
+           {"ts": 5003.0, "name": "Water dispenser", "w": 470.0},
+           {"ts": 9100.0, "name": "Water dispenser", "w": 477.0},     # too late for the third run
+           {"ts": 302.0, "name": "Heat Pump", "w": 1600.0}]           # wrong size for the 55 W pattern
+    h = sense_hints(runs, ons)
+    assert h == {7: {"name": "Water dispenser", "matches": 2, "share": 0.67}}
+
+
+def test_sense_ons_peak_and_edges(tmp_path):
+    from senseless.detect import load_sense_ons
+    from senseless.store import Store
+    s = Store(tmp_path / "t.db")
+    f = 1000
+    for ts, w in ((10, 0), (11, 203), (12, 298), (14, 1700), (40, 1690), (60, 0), (80, 1650)):
+        s.realtime({"frame": f, "epoch": ts, "w": 2000, "devices": [{"id": "mw", "name": "Microwave", "w": w}] if w else []}, ts)
+        f += 60
+    s.close()
+    ons = load_sense_ons(tmp_path / "t.db", 0)
+    assert [(o["ts"], o["w"]) for o in ons] == [(11, 1700), (80, 1650)]

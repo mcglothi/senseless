@@ -222,6 +222,11 @@ function Inspector({ run, patterns, onName, onZoom, onClose }) {
           <input id="run-name" value={text} onChange={e => setText(e.target.value)} placeholder="Name this load" style={{
             height: 40, background: C.field, border: `1px solid ${C.line2}`, borderRadius: 10, color: C.text, fontFamily: MONO, fontSize: 13, padding: '0 12px', outline: 'none' }} />
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {p.sense_hint && (
+              <button type="button" onClick={() => submit(p.sense_hint.name)} title="Sense's detection turned this on at the same moments"
+                style={{ cursor: 'pointer', minHeight: 34, fontFamily: MONO, fontSize: 11, padding: '5px 11px', borderRadius: 18,
+                  color: C.green, background: alpha(C.green, '10'), border: `1px solid ${alpha(C.green, '50')}` }}>Sense: {p.sense_hint.name}</button>
+            )}
             {nameIdeas(p).map(idea => (
               <button key={idea} type="button" onClick={() => submit(idea)} style={{ cursor: 'pointer', minHeight: 34, fontFamily: MONO, fontSize: 11,
                 padding: '5px 11px', borderRadius: 18, color: C.body, background: 'transparent', border: `1px solid ${C.line2}` }}>{idea}</button>
