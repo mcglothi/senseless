@@ -2,6 +2,23 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.8.0 (2026-10-16)
+
+### Added
+- **Bill** (`/bill`): this billing cycle priced by your tariff (fixed charge, delivery, supply, sales tax),
+  projected to the cycle end from Sense's daily history, with what each extra kWh costs. The same usage is
+  priced on every rate plan (CMP Rate A, time-of-use with your measured on-peak share, Electric Technology),
+  so you can see if switching would save money. Enter real bills to check the estimate; optionally scale
+  projections to match them. Settings for plan, supply price, cycle start day, tax rate and tax-free kWh.
+- Built-in tariffs: CMP residential delivery rates effective 2026-07-01 and the 2026 Maine Standard Offer,
+  with sources. A custom plan covers other utilities.
+- Billing API: `/api/billing`, `/api/billing/cycle`, `/api/billing/estimate`, `/api/billing/bills`.
+
+### Changed
+- Now's "cost so far" and the always-on $/day and $/year use your tariff (marginal rate plus the fixed
+  charge's daily share) instead of Sense's flat rate, which left out delivery.
+- Phone nav: tighter tabs so all seven fit at 420 px; on narrower screens the current tab scrolls into view.
+
 ## 0.7.1 (2026-10-16)
 
 ### Fixed

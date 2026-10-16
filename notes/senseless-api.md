@@ -144,6 +144,27 @@ user: "done"                                      → POST /api/hunt/stop
 
 Room ids come from `GET /api/floors` (each floor's `rooms`).
 
+## Billing
+
+Tariff-based bill estimates. Settings and entered bills live in `settings.db`.
+
+| Method | Path | Parameters | Returns |
+|---|---|---|---|
+| GET | `/api/billing` | None | `{settings, rates, plans, supply}`. `rates` = `{marginal_cents_per_kwh, fixed_per_day, plan, plan_label}`; `plans` carry `fixed`, `fixed_kwh`, `delivery` or `tou`, `source`, `effective`. |
+| POST | `/api/billing` | JSON patch of `plan` (`cmp-a`, `cmp-a-tou`, `cmp-et`, `custom`), `supply_per_kwh`, `supplier`, `billing_day` (1–28), `tax_rate`, `tax_exempt_kwh`, `custom` (`fixed`, `fixed_kwh`, `delivery`), `calibrate` | Saved settings. Unknown fields and out-of-range values return 400. |
+| GET | `/api/billing/cycle` | None | The cycle containing today: `start`, `end`, `days`, `elapsed_days`, `daily` kWh, `kwh_so_far`, `kwh_per_day` (last 7 complete days), `kwh_projected`, `so_far` and `projected` bills, `compare` (each plan's projected total and delta), `on_peak_share` (weekday 5–9 pm share over the last 7 complete days), `calibration`, `sense_cost_so_far`. 502 when Sense history is unavailable. |
+| GET | `/api/billing/estimate` | `kwh`, optional `on_peak_kwh` (required for time-of-use), `plan`, `months` | One bill: `fixed`, `delivery`, `supply`, `tax`, `total`, `effective_cents_per_kwh`, `marginal_cents_per_kwh`. |
+| GET | `/api/billing/bills` | None | Entered bills, newest first, each with `estimate`, `diff` and `ratio`. |
+| POST | `/api/billing/bills` | JSON `start`, `end` (YYYY-MM-DD, 7–62 days apart), `kwh`, `amount` | The new bill with its comparison. |
+| DELETE | `/api/billing/bills/{id}` | None | `{ok: true}`; 404 if unknown. |
+
+Bill model: `fixed` (per month; Rate A's covers the first 50 kWh of delivery) + delivery per kWh
+(time-of-use: on-peak/off-peak) + supply per kWh + sales tax on the share of the bill above the
+exempt kWh (Maine: first 750 kWh/month exempt, energy and delivery alike). The marginal rate
+includes tax only above the exemption. Daily kWh comes from Sense's cloud history (so a cycle that
+started before Senseless was installed is complete); `/api/today`'s `cost` uses the marginal rate
+plus the day's share of the fixed charge.
+
 ## Floor plans
 
 Floors, rooms and markers live in `settings.db`; images in `<data dir>/floorplans/`. Coordinates are

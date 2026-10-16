@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { C, MONO, alpha, glow } from '../ui/theme'
 import { link, useLocation } from '../router'
 
@@ -20,6 +21,7 @@ export const NAV = [
   { href: '/map', label: 'Map' },
   { href: '/hunt', label: 'Hunt' },
   { href: '/history', label: 'History' },
+  { href: '/bill', label: 'Bill' },
 ]
 
 function LivePill({ status, frame }) {
@@ -50,6 +52,14 @@ function IconButton({ label, onClick, children }) {
 
 export function TopBar({ status, frame, isMobile, onOpenAppearance, onToggleMode, light }) {
   const { path } = useLocation()
+  const nav = useRef(null)
+  // phones too narrow for every tab scroll the nav sideways: keep the current page's tab in view
+  useEffect(() => {
+    const el = nav.current?.querySelector('[aria-current="page"]')
+    const box = nav.current
+    if (!el || !box || box.scrollWidth <= box.clientWidth) return
+    box.scrollLeft = Math.max(0, el.offsetLeft - box.offsetLeft - (box.clientWidth - el.offsetWidth) / 2)
+  }, [path, isMobile])
   return (
     <header style={{
       display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', padding: isMobile ? '10px 14px' : '10px 28px',
@@ -61,7 +71,7 @@ export function TopBar({ status, frame, isMobile, onOpenAppearance, onToggleMode
         <span style={{ fontWeight: 700, fontSize: 17, letterSpacing: 0.4, color: C.bright }}>Senseless</span>
       </a>
       {/* One row on phones: tighter tabs, and a sideways scroll on screens too narrow even for that. */}
-      <nav aria-label="Primary" style={{
+      <nav ref={nav} aria-label="Primary" style={{
         display: 'flex', gap: isMobile ? 2 : 4, flexWrap: isMobile ? 'nowrap' : 'wrap', order: isMobile ? 3 : 0, width: isMobile ? '100%' : 'auto',
         overflowX: isMobile ? 'auto' : 'visible', scrollbarWidth: 'none',
         // A scroll container clips focus rings; this padding leaves room for them without moving the tabs.
@@ -73,7 +83,7 @@ export function TopBar({ status, frame, isMobile, onOpenAppearance, onToggleMode
             <a key={n.href} href={n.href} onClick={link(n.href)} aria-current={on ? 'page' : undefined}
               title={n.soon ? 'Coming soon' : undefined}
               style={{
-                fontFamily: MONO, fontSize: 11, letterSpacing: isMobile ? 1 : 1.5, textTransform: 'uppercase', padding: isMobile ? '8px 9px' : '8px 12px', borderRadius: 8, flexShrink: 0,
+                fontFamily: MONO, fontSize: 11, letterSpacing: isMobile ? 0.8 : 1.5, textTransform: 'uppercase', padding: isMobile ? '8px 7px' : '8px 12px', borderRadius: 8, flexShrink: 0,
                 color: on ? C.accent : n.soon ? C.dim : C.muted, background: on ? alpha(C.accent, '14') : 'transparent',
                 border: `1px solid ${on ? alpha(C.accent, '45') : 'transparent'}`,
               }}>{n.label}</a>

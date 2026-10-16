@@ -60,6 +60,12 @@ Browse days, months, and years from Sense's cloud history, cached locally. Drill
 ![History view with calendar and device breakdown](docs/screenshots/history.jpg)
 *Cloud history with local caching, period comparisons, and device totals.*
 
+### Bill
+
+Sense prices every kWh at one flat rate, which in Maine leaves out the delivery half of the bill. The Bill view prices your usage the way the utility bills it: a fixed monthly charge, delivery per kWh (flat or time-of-use), supply per kWh, and sales tax above the exempt amount. It projects the current billing cycle from Sense's daily history, shows the split, and says what each extra kWh costs. It also prices the same usage on every rate plan, so you can see whether time-of-use or another rate would be cheaper for how you actually use power. Enter real bills to check the estimate, and optionally scale projections to match them.
+
+Central Maine Power's published residential tariffs (Rate A, time-of-use, Electric Technology) and the Maine Standard Offer supply price are built in, with their sources and effective dates; a custom plan covers other utilities. The Now view's cost-so-far and the always-on $/year use the same tariff.
+
 ### Theming and appearance
 
 The default theme is **Senseless**. Choose base16 palettes from the tinted-theming gallery, preview them across the app, and set light, dark, or system mode. Adjust accent, background texture, glow, density, text size, and motion. Appearance settings are saved locally.
@@ -171,7 +177,7 @@ Your data directory contains:
 | Path | Contents |
 |---|---|
 | `senseless.db` | Realtime readings, on-board deltas, Sense's device power attribution on change, and other feed events. |
-| `settings.db` | Persistent patterns and names, breaker map, floor plans (floors, rooms, markers), appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
+| `settings.db` | Persistent patterns and names, breaker map, floor plans (floors, rooms, markers), billing settings and entered bills, appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
 | `floorplans/` | Uploaded floor plan images. |
 | `raw/rt-YYYY-MM-DD.jsonl.gz` | Daily compressed archives of every feed message, enabled by default. |
 | `themes-gallery.json` | Cached theme gallery. |
