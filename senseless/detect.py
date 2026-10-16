@@ -297,8 +297,10 @@ class PowerEvidence:
             values.update({leg: run.w * abs(w / off.w) for leg, w in off.leg_w.items()})
         elif run.legs != "both":
             values["both"] = run.w
-        self.closed_frames.append(off.frame)
-        self.closures.append((run.start_frame + run.stages[-1][0], values))
+        # keep both lists ordered by off frame: contradicts() binary-searches closed_frames
+        k = bisect_right(self.closed_frames, off.frame)
+        self.closed_frames.insert(k, off.frame)
+        self.closures.insert(k, (run.start_frame + run.stages[-1][0], values))
 
     def _below(self, legs: str, start: int, stop: int, floor: float) -> bool:
         lo = bisect_left(self.frames, start) + self.n
