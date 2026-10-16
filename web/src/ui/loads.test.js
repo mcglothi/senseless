@@ -45,5 +45,7 @@ describe('loads helpers', () => {
     expect(matchStep(ps, { leg: 2, w: -47 })?.id).toBe(1)
     expect(matchStep(ps, { leg: 2, w: 60 })).toBeNull()
     expect(matchStep(ps, { leg: 1, w: 2400 }, true)?.id).toBe(3)
+    // a single leg of a 240 V event must not match the combined pattern on its own
+    expect(matchStep(ps, { leg: 1, w: 1217 }, true)).toBeNull()
   })
 })

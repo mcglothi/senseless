@@ -178,9 +178,11 @@ function LiveChart({ series, deltas }) {
 function Feed({ deltas, pairs, cyclers, patterns }) {
   // same 30 W floor as detection: smaller steps are mostly the monitor's noise
   const rows = deltas.filter(d => Math.abs(d.w) >= 30).slice(-9).reverse()
-  const pairFrames = new Set(pairs.map(p => p.frame))
+  const pairFrames = new Map(pairs.map(p => [p.frame, p]))
   const tagOf = d => {
-    const p = matchStep(patterns, d, pairFrames.has(d.frame))
+    // a 240 V pattern stores the combined (both-leg) size, so match the pair's total, not one leg
+    const pair = pairFrames.get(d.frame)
+    const p = pair ? matchStep(patterns, { w: pair.w }, true) : matchStep(patterns, d)
     if (p?.name) return { text: `${p.name} ${d.w > 0 ? 'on' : 'off'}`, color: C.text }
     if (pairFrames.has(d.frame)) return { text: '240 V appliance', color: C.violet }
     const c = cyclers.find(x => x.leg === d.leg && Math.abs(Math.abs(d.w) - x.w) <= 6)

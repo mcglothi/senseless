@@ -111,6 +111,8 @@ export function LoadsView({ loads }) {
   useEffect(() => {
     const onKey = e => {
       if (e.metaKey || e.ctrlKey || e.altKey || !inbox.length) return
+      // keys on a focused button/link/field belong to it (Enter must still activate a button)
+      if (e.target instanceof Element && e.target.closest('button, a, input, textarea, select, [role=button]') && !busyTyping()) return
       if (busyTyping()) { if (e.key === 'Escape') document.activeElement.blur(); return }
       const k = e.key.toLowerCase()
       if (k === 'j') setFocus(f => Math.min(inbox.length - 1, f + 1))

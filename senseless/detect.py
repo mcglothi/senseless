@@ -56,6 +56,7 @@ class Run:
     # closed: off seen. running: no off yet, still plausible for its pattern. unresolved: no off and
     # older than its pattern ever runs (the off was missed: Sense's on/off steps aren't always symmetric).
     status: str = "closed"
+    generation: int = 0
 
     @property
     def running(self) -> bool:
@@ -69,7 +70,7 @@ class Run:
 
     def as_dict(self, now_ts: float) -> dict:
         d = self.duration_s(now_ts)
-        return {"start_frame": self.start_frame, "start_ts": self.start_ts, "end_frame": self.end_frame,
+        return {"generation": self.generation, "start_frame": self.start_frame, "start_ts": self.start_ts, "end_frame": self.end_frame,
                 "end_ts": self.end_ts, "legs": self.legs, "w": round(self.w, 1), "off_w": self.off_w,
                 "stages": self.stages, "duration_s": round(d, 1), "running": self.running, "status": self.status,
                 "wh": round(self.w * d / 3600, 2), "pattern": self.pattern}
@@ -99,14 +100,15 @@ def to_steps(deltas: list[dict]) -> list[Step]:
 
 
 def merge_stages(steps: list[Step]) -> list[Step]:
-    """Fold same-sign steps on the same legs within STAGE_FRAMES of the previous stage into one
-    multi-stage step. Steps on other legs in between don't interrupt; an opposite-sign step on the
-    same legs does."""
+    """Fold on-steps on the same legs within STAGE_FRAMES of the previous stage into one multi-stage
+    step. Steps on other legs in between don't interrupt; an off on the same legs does. Offs never
+    merge (two loads turning off a second apart must stay separately pairable)."""
     out: list[Step] = []
     last: dict[str, Step] = {}  # most recent step per legs, either sign
     for s in sorted(steps, key=lambda s: s.frame):
         prev = last.get(s.legs)
-        if prev is not None and (prev.w > 0) == (s.w > 0):
+        # only ons merge: two loads switching off a second apart must stay two pairable offs
+        if prev is not None and prev.w > 0 and s.w > 0:
             prev_end = prev.frame + (prev.stages[-1][0] if prev.stages else 0)
             if s.frame - prev_end <= STAGE_FRAMES:
                 if not prev.stages:
@@ -133,6 +135,9 @@ def pair_runs(steps: list[Step], now_ts: float) -> list[Run]:
             open_runs.append(r)
             runs.append(r)
             continue
+        # ons older than MAX_RUN_S can't be closed any more: their off was missed, and a much later
+        # unrelated drop must not turn them into day-long runs
+        open_runs[:] = [r for r in open_runs if s.ts - r.start_ts <= MAX_RUN_S]
         # most recent compatible open run on the same legs
         for r in reversed(open_runs):
             if r.legs == s.legs and _compatible(r, s):
@@ -188,10 +193,13 @@ class Patterns:
         with self._conn() as db:
             return [dict(r) for r in db.execute("SELECT * FROM patterns")]
 
+    def _snapshot(self, db) -> list[dict]:
+        return [dict(r) for r in db.execute("SELECT * FROM patterns")]
+
     def assign(self, runs: list[Run]) -> None:
         """Give every run a pattern id, creating patterns as needed. Named patterns' centres stay put."""
         with self._conn() as db:
-            pats = [dict(r) for r in db.execute("SELECT * FROM patterns")]
+            pats = self._snapshot(db)
             for r in runs:
                 stages = min(len(r.stages), 2)  # 1 = single step, 2 = multi-stage
                 best, best_err = None, None
@@ -218,7 +226,8 @@ class Patterns:
                     continue
                 if not p.get("name"):
                     p["center_w"] = sorted(x.w for x in rs)[len(rs) // 2]  # median
-                db.execute("UPDATE patterns SET center_w=?, n=?, last_seen=? WHERE id=?",
+                # the name guard is in SQL: a name set by the API after our snapshot still freezes the centre
+                db.execute("UPDATE patterns SET center_w = CASE WHEN name IS NULL THEN ? ELSE center_w END, n=?, last_seen=? WHERE id=?",
                            (p["center_w"], len(rs), max(x.start_ts for x in rs), p["id"]))
             # one-off sizes (noise, rare coincidences) would otherwise pile up forever
             db.execute("DELETE FROM patterns WHERE name IS NULL AND ignored=0 AND n=0 AND coalesce(last_seen, created) < ?",
@@ -242,15 +251,30 @@ class Patterns:
 
 
 def load_deltas(db_path: Path, since_ts: float) -> list[dict]:
+    """Deltas in the window, all frame-counter generations (uses the ts index, not a scan)."""
     db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     db.row_factory = sqlite3.Row
     try:
-        gen = db.execute("SELECT coalesce(max(generation), 0) FROM deltas").fetchone()[0]
         return [dict(r) for r in db.execute(
-            "SELECT start_frame, channel, w, ts FROM deltas WHERE generation=? AND ts >= ? ORDER BY start_frame",
-            (gen, since_ts))]
+            # no ORDER BY: it would make SQLite walk the primary key instead of the ts index; to_steps sorts
+            "SELECT generation, start_frame, channel, w, ts FROM deltas WHERE ts >= ?",
+            (since_ts,))]
     finally:
         db.close()
+
+
+def detect_runs(deltas: list[dict], now_ts: float) -> list[Run]:
+    """Steps and runs per frame-counter generation (frames only compare within one), combined.
+    A run spanning a monitor reboot can't close and expires like any missed off."""
+    by_gen: dict[int, list[dict]] = {}
+    for d in deltas:
+        by_gen.setdefault(d.get("generation", 0), []).append(d)
+    runs: list[Run] = []
+    for gen in sorted(by_gen):
+        for r in pair_runs(to_steps(by_gen[gen]), now_ts):
+            r.generation = gen
+            runs.append(r)
+    return runs
 
 
 class Detector:
@@ -264,8 +288,7 @@ class Detector:
 
     def recompute(self, now_ts: float | None = None) -> None:
         now_ts = now_ts if now_ts is not None else time.time()
-        steps = to_steps(load_deltas(self.deltas_db, now_ts - WINDOW_S))
-        runs = pair_runs(steps, now_ts)
+        runs = detect_runs(load_deltas(self.deltas_db, now_ts - WINDOW_S), now_ts)
         self.patterns.assign(runs)
         resolve_open_runs(runs, now_ts)
         self.runs, self.computed_at = runs, now_ts
@@ -290,7 +313,11 @@ class Detector:
                 s["example"] = r.as_dict(now)
             if r.start_ts >= day_start:
                 s["runs_today"] += 1
-                s["wh_today"] += r.w * r.duration_s(now) / 3600
+            # energy today: the part of the run after midnight (a 23:30-00:30 load counts its last half hour)
+            if r.status != "unresolved":
+                end = r.end_ts if r.end_ts is not None else now
+                overlap = max(0.0, end - max(r.start_ts, day_start))
+                s["wh_today"] += r.w * overlap / 3600
         out = []
         for p in self.patterns.all():
             s = stats.get(p["id"])

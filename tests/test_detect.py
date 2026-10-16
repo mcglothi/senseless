@@ -176,3 +176,56 @@ def test_short_pattern_is_not_running_minutes_later():
         r.pattern = 1
     resolve_open_runs(runs, now_ts=40 + 120)
     assert runs[-1].status == "unresolved"   # 13 s median: 2 minutes "on" is a missed off
+
+
+# ── regressions from the M2 review ──────────────────────────────────────────
+
+def test_stale_on_is_not_closed_by_a_drop_a_day_later():
+    runs = pair_runs(to_steps([d(0, 0, 500, ts=0), d(60 * 86400, 0, -500, ts=86400)]), now_ts=86400 + 1)
+    assert all(r.end_frame is None for r in runs)       # no 24 h "closed" run
+
+
+def test_two_offs_a_second_apart_close_their_own_runs():
+    runs = pair_runs(to_steps([d(0, 1, 500), d(600, 1, 100), d(1200, 1, -500), d(1260, 1, -100)]), now_ts=60)
+    assert sorted((r.w, r.end_frame) for r in runs) == [(100, 1260), (500, 1200)]
+
+
+def test_runs_before_a_counter_reset_survive():
+    from senseless.detect import detect_runs
+    deltas = [{"generation": 0, "start_frame": 5_000_000, "channel": 0, "w": 300, "ts": 100},
+              {"generation": 0, "start_frame": 5_000_600, "channel": 0, "w": -300, "ts": 110},
+              {"generation": 1, "start_frame": 1_000, "channel": 1, "w": 700, "ts": 200},
+              {"generation": 1, "start_frame": 1_600, "channel": 1, "w": -700, "ts": 210}]
+    runs = detect_runs(deltas, now_ts=300)
+    assert sorted((r.generation, r.w, r.status) for r in runs) == [(0, 300, "closed"), (1, 700, "closed")]
+
+
+def test_energy_today_counts_the_part_after_midnight(tmp_path):
+    from senseless.detect import Detector, Run
+    det = Detector(tmp_path / "unused.db", tmp_path / "s.db")
+    midnight = 1_800_000_000.0
+    r = Run(0, midnight - 1800, "L1", 1000.0, [(0, 1000.0)], end_frame=3600 * 60, end_ts=midnight + 1800, off_w=-1000, status="closed")
+    det.patterns.assign([r])
+    det.runs = [r]
+    load = det.loads(midnight)[0]
+    assert load["wh_today"] == 500.0 and load["runs_today"] == 0
+
+
+def test_named_centre_is_frozen_even_if_named_after_the_snapshot(tmp_path):
+    import sqlite3
+    p = Patterns(tmp_path / "s.db")
+    first = pair_runs(to_steps([d(0, 0, 100), d(600, 0, -100)]), now_ts=1e12)
+    p.assign(first)
+    pid = first[0].pattern
+    real = p._snapshot
+
+    def snapshot_then_named_by_api(db):
+        rows = real(db)                      # assign() sees the pattern unnamed...
+        with sqlite3.connect(tmp_path / "s.db") as other:
+            other.execute("UPDATE patterns SET name='Lamp' WHERE id=?", (pid,))  # ...then the API names it
+        return rows
+
+    p._snapshot = snapshot_then_named_by_api
+    p.assign(pair_runs(to_steps([d(0, 0, 110), d(600, 0, -110), d(1200, 0, 110), d(1800, 0, -110)]), now_ts=1e12))
+    row = next(x for x in Patterns(tmp_path / "s.db").all() if x["id"] == pid)
+    assert row["name"] == "Lamp" and row["center_w"] == 100   # named signature not moved to 110
