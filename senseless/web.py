@@ -5,12 +5,14 @@ import json
 import os
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 
 from aiohttp import web
 
 from . import summary
 from .appearance import Appearance, AppearanceError
+from .billing import Billing, BillingError
 from .circuits import CircuitError, Circuits
 from .floorplans import FloorplanError, Floorplans, IMAGE_TYPES, MAX_IMAGE_BYTES
 from .history import History, HistoryError
@@ -33,6 +35,13 @@ API_INDEX = [
     {"method": "POST", "path": "/api/loads/{id}/ignore", "body": {"ignored": "bool"}, "does": "hide a pattern from the inbox"},
     {"method": "GET", "path": "/api/runs?minutes=", "does": "individual on/off runs for the timeline"},
     {"method": "GET", "path": "/api/history?scale=day|week|month|year&date=", "does": "Sense cloud history and per-device breakdown"},
+    {"method": "GET", "path": "/api/billing", "does": "tariff settings, available rate plans (with sources), current marginal rate"},
+    {"method": "POST", "path": "/api/billing", "body": {"plan": "cmp-a|cmp-a-tou|cmp-et|custom", "supply_per_kwh": "num", "billing_day": "1-28", "tax_rate": "num", "tax_exempt_kwh": "num", "calibrate": "bool"}, "does": "change tariff settings"},
+    {"method": "GET", "path": "/api/billing/cycle", "does": "this billing cycle: kWh so far, projected bill with fixed/delivery/supply/tax, other plans compared"},
+    {"method": "GET", "path": "/api/billing/estimate?kwh=&on_peak_kwh=&plan=&months=", "does": "what a bill for that usage would be"},
+    {"method": "GET", "path": "/api/billing/bills", "does": "bills you entered, each with the model's estimate and the difference"},
+    {"method": "POST", "path": "/api/billing/bills", "body": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "kwh": "num", "amount": "num"}, "does": "enter a real bill to check the estimates"},
+    {"method": "DELETE", "path": "/api/billing/bills/{id}", "does": "remove an entered bill"},
     {"method": "GET", "path": "/api/hunt[?wait=version&timeout=s]", "does": "the hunt session; with wait, long-polls until it changes. Read `prompt` aloud, offer `actions`"},
     {"method": "POST", "path": "/api/hunt/start", "body": {"mode": "breaker|device", "include_background": "bool?"}, "does": "start (or restart) a hunt; breaker: next breaker after a save. Device mode ignores small loads that cycle all day unless include_background"},
     {"method": "POST", "path": "/api/hunt/save", "body": {"breaker": "str", "name": "str?"}, "does": "breaker mode: store the measured drop for this breaker"},
@@ -207,7 +216,8 @@ def _web_dir() -> Path | None:
 
 def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None,
              detector=None, circuits: Circuits | None = None, history: History | None = None,
-             floorplans: Floorplans | None = None, hunt: Hunt | None = None) -> web.Application:
+             floorplans: Floorplans | None = None, hunt: Hunt | None = None,
+             billing: Billing | None = None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
@@ -233,8 +243,23 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         return web.json_response(_query(db_path, "SELECT * FROM readings WHERE ts > ? ORDER BY frame", (since,)))
 
     async def today(_):
-        cost = (st.latest or {}).get("defaultCost")
-        return web.json_response(await asyncio.to_thread(summary.today, db_path, cost))
+        if billing is None:
+            cost = (st.latest or {}).get("defaultCost")
+            return web.json_response(await asyncio.to_thread(summary.today, db_path, cost))
+
+        def run():
+            # your tariff, not Sense's flat rate: energy at this cycle's marginal rate (time-of-use by hour)
+            # plus today's share of the fixed charge
+            r = billing.rates()
+            body = summary.today(db_path, r["marginal_cents_per_kwh"])
+            if body["kwh"]:
+                day = datetime.fromtimestamp(body["since"], summary.local_tz()).date()
+                energy, r = billing.price_today(body["kwh"], body["hourly_w"], day)
+                body["cost"] = round(energy + r["fixed_per_day"] * min(1.0, (time.time() - body["since"]) / 86400), 2)
+            body["cost_basis"] = r["plan_label"]
+            body["fixed_per_day"] = r["fixed_per_day"]
+            return body
+        return web.json_response(await asyncio.to_thread(run))
 
     baseline_cache = {"at": 0.0, "body": None}
 
@@ -569,6 +594,69 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
                                   "writes": "JSON bodies; requests from browsers must be same-origin. Errors are {\"error\": ...}.",
                                   "endpoints": API_INDEX})
 
+    # ── billing (tariff, cycle projection, plan comparison, entered bills) ──
+    def _bill():
+        if billing is None:
+            raise web.HTTPNotFound(text="billing not configured")
+        return billing
+
+    async def billing_get(_):
+        from .billing import PLANS, SUPPLY
+        b = _bill()
+        return web.json_response({"settings": await asyncio.to_thread(b.settings), "rates": await asyncio.to_thread(b.rates),
+                                  "plans": PLANS, "supply": SUPPLY})
+
+    async def billing_post(req):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().update, await _body(req)))
+        except BillingError as e:
+            return _bad(e)
+
+    async def billing_cycle(_):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().cycle))
+        except BillingError as e:
+            return _bad(e)
+        except HistoryError as e:
+            return web.json_response({"error": f"Sense history unavailable: {e}"}, status=502)
+
+    async def billing_estimate(req):
+        from .billing import estimate
+        try:
+            kwh = float(req.query["kwh"])
+            on = float(req.query["on_peak_kwh"]) if "on_peak_kwh" in req.query else None
+            months = float(req.query.get("months", 1))
+            if not (0 <= kwh < 1e6 and 0.1 <= months <= 24) or (on is not None and not 0 <= on <= kwh):
+                raise ValueError
+        except (KeyError, ValueError):
+            return _bad("kwh (0+), optional on_peak_kwh (0..kwh) and months (0.1-24) must be numbers")
+        try:
+            s = await asyncio.to_thread(_bill().settings)
+            return web.json_response(estimate(s, kwh, on, req.query.get("plan"), months))
+        except BillingError as e:
+            return _bad(e)
+
+    async def bills_get(_):
+        return web.json_response(await asyncio.to_thread(_bill().bills))
+
+    async def bills_add(req):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().add_bill, await _body(req)))
+        except BillingError as e:
+            return _bad(e)
+
+    async def bills_remove(req):
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        try:
+            await asyncio.to_thread(_bill().remove_bill, int(req.match_info["id"]))
+        except ValueError:
+            return _bad("id must be an integer")
+        except KeyError:
+            raise web.HTTPNotFound(text="no such bill") from None
+        return web.json_response({"ok": True})
+
     # ── history (Sense cloud, cached) ───────────────────────────────────────
     async def history_get(req):
         if history is None:
@@ -592,7 +680,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
     app.add_routes([
         web.get("/", index), web.get("/status", legacy),
         # client-side routes: reloading them must serve the app, not 404
-        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt", "/map")],
+        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt", "/map", "/bill")],
         web.get("/healthz", healthz), web.get("/metrics", metrics),
         web.get("/api/status", status), web.get("/api/deltas", deltas), web.get("/api/readings", readings),
         web.get("/api/today", today), web.get("/api/series", series), web.get("/api/baseline", baseline_get), web.get("/api/stream", stream),
@@ -605,6 +693,10 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.delete("/api/circuits/{id}", circuits_remove),
         web.get("/api/history", history_get),
         web.get("/api", api_index),
+        web.get("/api/billing", billing_get), web.post("/api/billing", billing_post),
+        web.get("/api/billing/cycle", billing_cycle), web.get("/api/billing/estimate", billing_estimate),
+        web.get("/api/billing/bills", bills_get), web.post("/api/billing/bills", bills_add),
+        web.delete("/api/billing/bills/{id}", bills_remove),
         web.get("/api/hunt", hunt_get),
         web.post("/api/hunt/start", hunt_cmd(_start)), web.post("/api/hunt/save", hunt_cmd(_save)),
         web.post("/api/hunt/label", hunt_cmd(_label)), web.post("/api/hunt/retry", hunt_cmd(_retry)),
@@ -634,10 +726,11 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
 
 async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None,
                 circuits: Circuits | None = None, history: History | None = None,
-                floorplans: Floorplans | None = None, hunt: Hunt | None = None) -> web.AppRunner:
+                floorplans: Floorplans | None = None, hunt: Hunt | None = None,
+                billing: Billing | None = None) -> web.AppRunner:
     # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
     runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits, history=history, floorplans=floorplans,
-                                      hunt=hunt),
+                                      hunt=hunt, billing=billing),
                              access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))

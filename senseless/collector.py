@@ -21,6 +21,7 @@ import websockets
 
 from . import auth, web
 from .appearance import Appearance
+from .billing import Billing
 from .circuits import Circuits
 from .floorplans import Floorplans
 from .detect import Detector
@@ -226,9 +227,10 @@ class Collector:
         self.detector = Detector(self.store.path, settings_db)
         circuits = Circuits(settings_db)
         self.hunt = Hunt(circuits, self.detector, healthy=self.state.healthy, publish=self.state.publish)
+        history = History(settings_db, lambda: self.sess)
         runner = await web.serve(self.state, self.store.path, Appearance(settings_db, self.store.path.parent), self.detector,
-                                 circuits, History(settings_db, lambda: self.sess),
-                                 Floorplans(settings_db, self.store.path.parent), self.hunt)
+                                 circuits, history, Floorplans(settings_db, self.store.path.parent), self.hunt,
+                                 Billing(settings_db, history))
         tasks = [asyncio.create_task(self.connect_loop()), asyncio.create_task(self.watchdog()),
                  asyncio.create_task(self.detect_loop())]
         await self.stopping.wait()
