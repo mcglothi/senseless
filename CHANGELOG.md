@@ -2,6 +2,15 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.13.0 (2026-10-16)
+
+### Changed
+- **The bill runs on data you own.** The cycle's daily totals now come from Senseless's own recorded readings
+  whenever a day is (nearly) fully recorded, then from imported utility-meter data, and only then from Sense's
+  cloud history (days before Senseless was installed, or gaps). Time-of-use shares and recent hourly profiles
+  follow the same order. If Sense's servers are unreachable or gone, the Bill page keeps working; each day in
+  `/api/billing/cycle` reports its `source`, with a `day_sources` summary.
+
 ## 0.12.1 (2026-10-16)
 
 ### Fixed

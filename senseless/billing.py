@@ -125,9 +125,13 @@ def is_on_peak(dt: datetime, tou: dict) -> bool:
 
 
 class Billing:
-    def __init__(self, settings_db: Path, history=None, clock=time.time):
+    def __init__(self, settings_db: Path, history=None, clock=time.time, local=None):
         self.db_path = settings_db
         self.history = history
+        # Senseless's own readings, preferred over Sense's cloud history: callable(start_ts, end_ts, now) ->
+        # {date: {kwh, coverage, hourly}} (summary.local_days). Sense may shut its servers down; this keeps the
+        # bill working on data that lives here.
+        self.local = local
         self.clock = clock
         self._lock = threading.Lock()
         with self._conn() as db:
@@ -216,7 +220,9 @@ class Billing:
         metadata = {k: result[k] for k in ('importer', 'label')}
         if result['kind'] == 'bill':
             return {'kind': 'bill-pdf', **self._save_bill(result['bill']), **metadata}
-        return {'kind': 'meter-csv', **self.usage.save(result['rows'], result['source']), **metadata}
+        saved = self.usage.save(result['rows'], result['source'])
+        self._meter_cache = None          # an import can change values without changing the fingerprint
+        return {'kind': 'meter-csv', **saved, **metadata}
 
     def _pricing_pack(self, settings):
         pack = pricing_pack(settings, self.tariffs.get(settings['pack']))
@@ -481,8 +487,18 @@ class Billing:
 
     # ── meter-backed analysis ───────────────────────────────────────────
     def _meter_rows(self) -> list[dict]:
+        # one page load asks for these several times (cycle, on-peak share, insights): rebuild only when the
+        # stored intervals (or the tariff's time zone) changed, judged by a cheap fingerprint of the table
         settings = self.settings()
-        return self.usage.hourly(ZoneInfo(self.tariffs.get(settings['pack'])['timezone']))
+        tzname = self.tariffs.get(settings['pack'])['timezone']
+        with self._conn() as db:
+            key = (tzname, *db.execute('SELECT count(*), max(ts), total(kwh), total(seconds) FROM usage_interval').fetchone())
+        cached = getattr(self, "_meter_cache", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        rows = self.usage.hourly(ZoneInfo(tzname))
+        self._meter_cache = (key, rows)
+        return rows
 
     @staticmethod
     def _meter_days(rows: list[dict]) -> dict:
@@ -545,7 +561,10 @@ class Billing:
         daily = {d: item for d, item in self._meter_days(rows).items() if d < today and self._complete_day(d, item)}
         comparison = None
         if daily and self.history is not None:
-            sense, _ = self._daily_kwh(min(daily), max(daily) + timedelta(days=1), today - timedelta(days=1))
+            try:
+                sense, _ = self._sense_daily(min(daily), max(daily) + timedelta(days=1), today - timedelta(days=1))
+            except Exception:  # noqa: BLE001 - Sense unreachable: no comparison
+                sense = {}
             both = sorted(d for d in daily if d in sense)
             if both:
                 monthly = {}
@@ -620,9 +639,63 @@ class Billing:
         return min(1.6, max(0.6, remaining / recent))
 
     # ── the current cycle ───────────────────────────────────────────────
-    def _daily_kwh(self, start: date, end: date, today: date) -> tuple[dict[date, float], float]:
+    LOCAL_COMPLETE = 0.97   # share of a day Senseless must have recorded to stand on its own
+
+    def _local_days(self, start: date, end: date) -> dict:
+        """Senseless's per-day energy for [start, end). One page load needs the cycle and the week before it several
+        times, so the widest window read in the current minute is kept and sliced."""
+        if self.local is None:
+            return {}
+        minute = int(self.clock() // 60)
+        memo = getattr(self, "_local_memo", None)
+        if not (memo and memo[0] == minute and memo[1] <= start and end <= memo[2]):
+            lo, hi = start, end
+            if memo and memo[0] == minute:            # widen to cover both, so the next call is a slice
+                lo, hi = min(lo, memo[1]), max(hi, memo[2])
+            tz = local_tz()
+            try:
+                days = self.local(datetime.combine(lo, datetime.min.time(), tz).timestamp(),
+                                  datetime.combine(hi, datetime.min.time(), tz).timestamp(), self.clock())
+            except Exception:      # noqa: BLE001 - a local read problem falls back to the other sources
+                days = {}
+            memo = self._local_memo = (minute, lo, hi, days)
+        return {d: v for d, v in memo[3].items() if start <= d < end}
+
+    def _daily_kwh(self, start: date, end: date, today: date) -> tuple[dict[date, float], float, dict]:
+        """kWh per day for [start, end), from the best source that has the whole day: Senseless's own readings,
+        then imported utility-meter data, then Sense's cloud history (only for days before Senseless recorded,
+        or gaps); a partly recorded day with no other source is scaled up from what was recorded. Also what Sense's
+        flat-rate cost said (for comparison) and each day's source."""
+        last = min(today, end - timedelta(days=1))
+        local = self._local_days(start, last + timedelta(days=1))
+        meter = {}
+        if self.usage is not None:
+            meter = {d: item["kwh"] for d, item in self._meter_days(self._meter_rows()).items()
+                     if start <= d <= last and self._complete_day(d, item)}
+        try:
+            sense, sense_cents = self._sense_daily(start, end, today)
+        except Exception:      # noqa: BLE001 - Sense's cloud unreachable: carry on with local data
+            sense, sense_cents = {}, 0.0
+        out, source = {}, {}
+        d = start
+        while d <= last:
+            item = local.get(d)
+            if item and item["coverage"] >= self.LOCAL_COMPLETE:
+                out[d], source[d] = item["kwh"], "senseless"
+            elif d in meter:
+                out[d], source[d] = meter[d], "meter"
+            elif d in sense:
+                out[d], source[d] = sense[d], "sense"
+            elif item and item["coverage"] >= 0.5:
+                out[d], source[d] = item["kwh"] / item["coverage"], "senseless-estimated"
+            d += timedelta(days=1)
+        return out, sense_cents, source
+
+    def _sense_daily(self, start: date, end: date, today: date) -> tuple[dict[date, float], float]:
         """kWh per day from Sense's cloud history (complete back to before Senseless existed), and what
         Sense's own flat-rate cost said for those days."""
+        if self.history is None:
+            return {}, 0.0
         out: dict[date, float] = {}
         sense_cents = 0.0
         months, d = [], start.replace(day=1)
@@ -639,15 +712,40 @@ class Billing:
                     sense_cents += cents[i] if i < len(cents) and cents[i] is not None else 0
         return out, sense_cents
 
+    def _day_hours(self, day: date, local: dict | None = None) -> list | None:
+        """24 hourly kWh for a complete past day: Senseless's readings, else the utility meter, else Sense."""
+        local = local if local is not None else self._local_days(day, day + timedelta(days=1))
+        item = local.get(day)
+        if item and item["coverage"] >= self.LOCAL_COMPLETE:
+            return item["hourly"]
+        if self.usage is not None:
+            tz = local_tz()
+            hours = [0.0] * 24
+            seen = 0
+            for row in self._meter_rows():
+                dt = datetime.fromtimestamp(row["ts"], tz)
+                if dt.date() == day:
+                    hours[dt.hour] += row["kwh"]
+                    seen += 1
+            if seen >= 23:
+                return hours
+        if self.history is None:
+            return None
+        try:
+            hours = self.history.get("day", day.isoformat()).get("kwh") or []
+        except Exception:      # noqa: BLE001
+            return None
+        return hours if len(hours) >= 23 else None
+
     def _on_peak_share(self, tou: dict, today: date) -> tuple[float | None, int]:
         """Share of kWh in on-peak hours over the 7 days before today (one full week, so weekdays and the
         weekend are mixed as they will be; days before the cycle count too). Hourly from Sense's history."""
         on = total = 0.0
         n = 0
+        local = self._local_days(today - timedelta(days=7), today)
         for d in (today - timedelta(days=k) for k in range(1, 8)):
-            body = self.history.get("day", d.isoformat())
-            hours = body.get("kwh") or []
-            if len(hours) < 23:
+            hours = self._day_hours(d, local)
+            if hours is None:
                 continue
             for h, kwh in enumerate(hours):
                 if kwh is None:
@@ -668,24 +766,25 @@ class Billing:
     def _recent_hourly(self, today):
         rows = []
         tz = local_tz()
+        local = self._local_days(today - timedelta(days=7), today)
         for offset in range(1, 8):
             day = today - timedelta(days=offset)
-            body = self.history.get('day', day.isoformat())
-            for hour, kwh in enumerate(body.get('kwh') or []):
+            for hour, kwh in enumerate(self._day_hours(day, local) or []):
                 if kwh is not None:
                     rows.append({'ts': int(datetime.combine(day, datetime.min.time(), tz).replace(hour=min(hour, 23)).timestamp()),
                                  'kwh': max(0, kwh)})
         return rows
 
     def cycle(self) -> dict:
-        if self.history is None:
-            raise BillingError("history is not configured")
+        if self.history is None and self.local is None:
+            raise BillingError("no usage source: neither Senseless readings nor Sense history is configured")
         s = self.settings()
         tz = local_tz()
         now = datetime.fromtimestamp(self.clock(), tz)
         today = now.date()
         start, end = cycle_bounds(s["billing_day"], today)
-        daily, sense_cents = self._daily_kwh(start, end, today)
+        self._local_days(min(start, today - timedelta(days=7)), today + timedelta(days=1))   # one read for this page
+        daily, sense_cents, sources = self._daily_kwh(start, end, today)
         so_far = sum(daily.values())
         days = (end - start).days
         # elapsed as a fraction of days, today counted by the hour
@@ -730,7 +829,7 @@ class Billing:
                                 "delta": round(b["total"] - reference, 2) if reference is not None else None, "basis": basis})
         return {
             "start": start.isoformat(), "end": end.isoformat(), "days": days, "elapsed_days": round(elapsed, 2),
-            "daily": [{"date": d.isoformat(), "kwh": round(daily[d], 3)} for d in sorted(daily)],
+            "daily": [{"date": d.isoformat(), "kwh": round(daily[d], 3), "source": sources.get(d)} for d in sorted(daily)],
             "kwh_so_far": round(so_far, 2), "kwh_per_day": round(per_day, 2), "kwh_projected": round(projected, 1),
             "projection_basis": projection_basis, "seasonal_factor": round(seasonal, 3) if seasonal is not None else None,
             "missing_days": [d.isoformat() for d in missing],
@@ -741,6 +840,7 @@ class Billing:
             "on_peak_share": round(share, 3) if share is not None else None, "on_peak_days": share_days,
             "calibration": factor,
             "sense_cost_so_far": round(sense_cents / 100, 2) if sense_cents else None,
+            "day_sources": {k: sum(1 for v in sources.values() if v == k) for k in sorted(set(sources.values()))},
             "plan": self.plan(s), "supply": self.supply_info(),
         }
 

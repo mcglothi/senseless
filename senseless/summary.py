@@ -101,3 +101,34 @@ def series(db_path: Path, start: float, end: float, bucket_s: float) -> list[dic
         db.close()
     rnd = lambda v: round(v, 1) if v is not None else None
     return [{"t": r["t"], "w": rnd(r["w"]), "l1": rnd(r["l1"]), "l2": rnd(r["l2"]), "w_max": rnd(r["w_max"])} for r in rows]
+
+
+def local_days(db_path: Path, start: float, end: float, now: float | None = None, tz: ZoneInfo | None = None) -> dict:
+    """Energy per local day from Senseless's own readings: {date: {kwh, coverage, hourly: [kWh x 24]}}.
+    Per-minute means from SQL; a minute with readings counts as covered. Coverage is covered minutes over the
+    day's minutes (today: minutes elapsed so far), so callers can tell a complete day from a gap."""
+    tz = tz or local_tz()
+    now = now if now is not None else time.time()
+    db = _connect(db_path)
+    try:
+        rows = db.execute("SELECT CAST(ts / 60 AS INTEGER) AS m, avg(w) AS w FROM readings "
+                          "WHERE ts >= ? AND ts < ? AND w IS NOT NULL GROUP BY m",
+                          # the minute in progress is left out until it's complete (it would count as a full one)
+                          (start, min(end, (now // 60) * 60))).fetchall()
+    finally:
+        db.close()
+    out: dict = {}
+    for r in rows:
+        dt = datetime.fromtimestamp(r["m"] * 60, tz)
+        item = out.setdefault(dt.date(), {"wh": 0.0, "minutes": 0, "hourly_wh": [0.0] * 24})
+        wh = max(0.0, r["w"]) / 60
+        item["wh"] += wh
+        item["minutes"] += 1
+        item["hourly_wh"][dt.hour] += wh
+    result = {}
+    for day, item in out.items():
+        begin = datetime.combine(day, datetime.min.time(), tz).timestamp()
+        span = min(now, datetime.combine(day + timedelta(days=1), datetime.min.time(), tz).timestamp()) - begin
+        result[day] = {"kwh": item["wh"] / 1000, "coverage": min(1.0, item["minutes"] * 60 / span) if span > 0 else 0.0,
+                       "hourly": [w / 1000 for w in item["hourly_wh"]]}
+    return result

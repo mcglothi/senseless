@@ -19,7 +19,7 @@ from pathlib import Path
 
 import websockets
 
-from . import auth, web
+from . import auth, summary, web
 from .appearance import Appearance
 from .billing import Billing
 from .circuits import Circuits
@@ -230,7 +230,7 @@ class Collector:
         history = History(settings_db, lambda: self.sess)
         runner = await web.serve(self.state, self.store.path, Appearance(settings_db, self.store.path.parent), self.detector,
                                  circuits, history, Floorplans(settings_db, self.store.path.parent), self.hunt,
-                                 Billing(settings_db, history))
+                                 Billing(settings_db, history, local=lambda a, b, now: summary.local_days(self.store.path, a, b, now)))
         tasks = [asyncio.create_task(self.connect_loop()), asyncio.create_task(self.watchdog()),
                  asyncio.create_task(self.detect_loop())]
         await self.stopping.wait()
