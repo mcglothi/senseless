@@ -79,12 +79,16 @@ def _total(p: dict, settings: dict, kwh: float, on: float | None, months: float)
     else:
         delivery = max(0.0, kwh - p["fixed_kwh"] * months) * p["delivery"]
     supply = kwh * settings["supply_per_kwh"]
-    before_tax = fixed + delivery + supply
-    # the exemption covers the first N kWh of energy and delivery alike: tax the share above it
+    # Sales tax, as CMP bills it: only kWh above the exemption, at their per-kWh delivery and supply
+    # rates; the fixed charge isn't taxed (Sept 2026 bill: 600 kWh x (11.959 + 12.721)¢ x 5.5% = $8.15).
     exempt = settings["tax_exempt_kwh"] * months
-    taxable_share = max(0.0, kwh - exempt) / kwh if kwh > 0 else 0.0
-    tax = before_tax * taxable_share * settings["tax_rate"]
-    return {"fixed": fixed, "delivery": delivery, "supply": supply, "tax": tax, "total": before_tax + tax}
+    taxable = max(0.0, kwh - exempt)
+    if p["tou"]:
+        per_kwh_delivery = delivery / kwh if kwh else 0.0     # which kWh are "above 750" isn't defined by hour: average
+    else:
+        per_kwh_delivery = p["delivery"] if kwh > p["fixed_kwh"] * months else 0.0
+    tax = taxable * (per_kwh_delivery + settings["supply_per_kwh"]) * settings["tax_rate"]
+    return {"fixed": fixed, "delivery": delivery, "supply": supply, "tax": tax, "total": fixed + delivery + supply + tax}
 
 
 def estimate(settings: dict, kwh: float, on_peak_kwh: float | None = None, plan_id: str | None = None,
@@ -118,11 +122,17 @@ def bill_months(start: date, end: date) -> float:
     return 1.0 if 26 <= days <= 35 else days / 30.44
 
 
+def _on_day(month_start: date, billing_day: int) -> date:
+    """billing_day of that month, clamped to its length (the 31st in February is the 28th or 29th)."""
+    nxt = (month_start + timedelta(days=32)).replace(day=1)
+    return month_start.replace(day=min(billing_day, (nxt - month_start).days))
+
+
 def cycle_bounds(billing_day: int, today: date) -> tuple[date, date]:
     """[start, end) of the billing cycle containing today; the cycle starts on billing_day each month."""
-    start = today.replace(day=billing_day) if today.day >= billing_day else \
-        (today.replace(day=1) - timedelta(days=1)).replace(day=billing_day)
-    end = (start.replace(day=1) + timedelta(days=32)).replace(day=billing_day)
+    this = _on_day(today.replace(day=1), billing_day)
+    start = this if today >= this else _on_day((today.replace(day=1) - timedelta(days=1)).replace(day=1), billing_day)
+    end = _on_day((start.replace(day=1) + timedelta(days=32)).replace(day=1), billing_day)
     return start, end
 
 
@@ -182,8 +192,8 @@ class Billing:
                         raise BillingError("supplier must be a short name")
                     v = v.strip()
                 elif k == "billing_day":
-                    if type(v) is not int or not 1 <= v <= 28:
-                        raise BillingError("billing_day must be a whole number from 1 to 28")
+                    if type(v) is not int or not 1 <= v <= 31:
+                        raise BillingError("billing_day must be a whole number from 1 to 31")
                 elif k == "calibrate":
                     if type(v) is not bool:
                         raise BillingError("calibrate must be true or false")
