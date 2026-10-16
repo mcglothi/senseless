@@ -173,9 +173,9 @@ fractions (0–1) of the image's width and height. Design, validation rules and 
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/floors` | None | Floors ordered by `ord, id`, each with `image_url` (or null), `img_w`, `img_h`, `rooms`, `markers`. |
-| POST | `/api/floors` | `{name}` | The floor. At most 20. |
-| PATCH | `/api/floors/{id}` | `{name?, ord?}` | The floor. |
+| GET | `/api/floors` | None | Floors ordered by `ord, id`, each with `building_id`, `level`, `image_url` (or null), `img_w`, `img_h`, `rooms`, `markers`. |
+| POST | `/api/floors` | `{name, building_id?, level?}` | The floor. At most 20 across the property. |
+| PATCH | `/api/floors/{id}` | `{name?, ord?, building_id?, level?}` | The floor; `building_id` moves it with its rooms, markers and image. |
 | DELETE | `/api/floors/{id}` | None | `{ok: true}`; deletes its rooms, markers and image. |
 | PUT | `/api/floors/{id}/image` | Raw PNG/JPEG/WebP bytes, matching `Content-Type`, header `X-Senseless-Upload: 1` | The floor. Magic bytes must match; at most 15 MB and 12000 px per side. |
 | GET | `/api/floors/{id}/image` | None | The image, `immutable` cache (the URL changes when it's replaced), `nosniff`. |
@@ -186,6 +186,41 @@ fractions (0–1) of the image's width and height. Design, validation rules and 
 
 The image upload is not JSON: the custom header forces a CORS preflight, so other sites cannot send it,
 and a supplied `Origin` must match the host as below.
+
+## Property map and buildings
+
+One property per install, stored alongside buildings and floors in `settings.db`. The startup migration
+preserves existing floors, rooms, markers and image files, assigning legacy floors to a single
+**Main house** building with levels 0, 1, 2… in their previous `ord, id` order. Repeated startup leaves
+the hierarchy unchanged. See [property-spec.md](property-spec.md).
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/api/property` | None | `{name, image, img_w, img_h, buildings}`; buildings ordered by `ord, id`, each with nested `floors` ordered by `level DESC, ord, id`. Floors include rooms and markers as in `/api/floors`. |
+| PATCH | `/api/property` | `{name}` | The property with nested buildings and floors. Default name is `Home`. |
+| PUT | `/api/property/image` | Raw PNG/JPEG/WebP, matching `Content-Type`, header `X-Senseless-Upload: 1` | The property. Same upload guards as floor images: magic/header validation, 15 MiB cap (including chunked bodies), maximum 12000 px per side, same-origin writes. |
+| GET | `/api/property/image` | None | Site image; `Cache-Control: max-age=31536000, immutable`, `X-Content-Type-Options: nosniff`; 404 if absent. |
+| DELETE | `/api/property/image` | None | The property with image and dimensions cleared; removes the file. Safe to repeat. |
+| POST | `/api/buildings` | `{name, icon?, x?, y?, w?, h?}` | The building: `{id, name, icon, ord, x, y, w, h, created}`. Defaults: icon `house`, ord 0, unplaced footprint (all four values null). |
+| PATCH | `/api/buildings/{id}` | Any of `{name, icon, ord, x, y, w, h}` | The building. |
+| DELETE | `/api/buildings/{id}` | None | `{ok: true}`; cascades floors, rooms and markers and removes all deleted floors' image files. The site image is retained. |
+
+Property `image` is a versioned URL (`/api/property/image?v=<filename>`) or null. Replacing it removes
+the previous file. Property images use server-generated `property-1-<random hex>.<ext>` basenames in
+the same guarded image directory as floor images.
+
+Names are trimmed, non-blank strings of at most 60 characters. Building icons: `house`, `garage`,
+`barn`, `shed`, `greenhouse`, `pool`, `workshop`, `office`, `other`. Building `ord` is an integer
+0–1000. A footprint must be either entirely null (unplaced) or a complete rectangle of finite numbers
+0–1, with `w, h >= 0.02`, `x+w <= 1`, `y+h <= 1`. Patches validate the resulting rectangle; set all
+four coordinates to null to unplace a building.
+
+Floor `building_id` must identify an existing building. Omission on creation selects the first building
+by `ord, id`, creating **Main house** if none exist. Levels are integers −5…20, unique per building;
+duplicate levels return 400. An omitted create level uses the lowest free nonnegative level, then
+−1…−5 if needed. Moving a floor retains its level unless a new one is supplied; if the destination
+already has that level, supply a free `level` in the same patch. Unknown IDs return 404; invalid
+fields, values and duplicate levels return 400. JSON and same-origin write rules below apply.
 
 ## Write protection
 

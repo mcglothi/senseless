@@ -24,6 +24,15 @@ const PATHS = {
   tool: 'M14.5 5.5a4 4 0 0 0 4.9 4.9L10 19.8a2.1 2.1 0 0 1-3-3l9.4-9.4a4 4 0 0 0-1.9-1.9z',
   panel: 'M5 2h14v20H5zM9 6h2M13 6h2M9 10h2M13 10h2M9 14h2M13 14h2M9 18h6',
   other: `${RING}M12 16.5h.01M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5`,
+  // buildings (property map)
+  house: 'M3 11 12 4l9 7M5 9.5V20h14V9.5M10 20v-5h4v5',
+  garage: 'M3 10 12 4l9 6v10H3zM6 20v-7h12v7M6 15.5h12M6 18h12',
+  barn: 'M3 10l3-5h12l3 5v10H3zM3 10h18M9 20v-6h6v6M9 14l6 6M15 14l-6 6',
+  shed: 'M4 10l8-5 8 5v10H4zM9 20v-6h6v6M12 14v6',
+  greenhouse: 'M3 20V11a9 7 0 0 1 18 0v9zM12 4v16M3 14h18M7.5 6.5V20M16.5 6.5V20',
+  pool: 'M3 18c1.5 0 1.5-1 3-1s1.5 1 3 1 1.5-1 3-1 1.5 1 3 1 1.5-1 3-1 1.5 1 3 1M7 15V5a2 2 0 0 1 4 0M13 15V5a2 2 0 0 1 4 0M7 9h6M7 12.5h6',
+  workshop: 'M3 20V9l6 3V9l6 3V5h6v15zM7 16h2M12 16h2M17 16h2',
+  office: 'M5 20V4h10v16M15 9h4v11M8 7h1.5M10.5 7H12M8 10.5h1.5M10.5 10.5H12M8 14h1.5M10.5 14H12M3 20h18',
 }
 
 export function Icon({ name, size = 18, color = 'currentColor', strokeWidth = 1.8, style }) {

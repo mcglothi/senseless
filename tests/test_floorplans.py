@@ -72,7 +72,7 @@ MARKER = dict(kind='load', ref=' Microwave ', x=0.3, y=0.4)
 
 
 def test_crud_and_persistence(fp, floor, tmp_path):
-    assert fp.all() == [dict(id=floor, name='Ground', ord=0, image_url=None, img_w=None, img_h=None, rooms=[], markers=[])]
+    assert fp.all() == [dict(id=floor, name='Ground', building_id=1, level=0, ord=0, image_url=None, img_w=None, img_h=None, rooms=[], markers=[])]
     other = fp.add_floor({'name': 'Upstairs'})['id']
     fp.update_floor(floor, {'name': ' Downstairs ', 'ord': 10})
     assert [f['id'] for f in fp.all()] == [other, floor]
@@ -208,10 +208,18 @@ def test_unknown_ids(fp, floor):
 
 
 def test_limits(fp, floor):
-    for i in range(19):
+    for i in range(25):                     # one building: levels -5..20 (the fixture made level 0)
         fp.add_floor({'name': str(i)})
-    with pytest.raises(FloorplanError):
+    with pytest.raises(FloorplanError):     # every level taken: a clean error, not a crash
         fp.add_floor({'name': 'Overflow'})
+    other = fp.add_building({'name': 'Barn', 'icon': 'barn'})['id']
+    for i in range(26):
+        fp.add_floor({'name': f'b{i}', 'building_id': other})
+    third = fp.add_building({'name': 'Shed', 'icon': 'shed'})['id']
+    for i in range(8):                      # 60 floors property-wide
+        fp.add_floor({'name': f's{i}', 'building_id': third})
+    with pytest.raises(FloorplanError):
+        fp.add_floor({'name': 'Overflow', 'building_id': third})
     for i in range(100):
         room = fp.add_room(floor, ROOM)
     fp.update_room(room['id'], {'name': 'Still allowed'})
@@ -232,14 +240,15 @@ def test_limits(fp, floor):
 
 
 def test_concurrent_floor_limit(fp):
+    buildings = [fp.add_building({'name': f'B{i}', 'icon': 'shed'})['id'] for i in range(4)]
     def add(i):
         try:
-            fp.add_floor({'name': str(i)})
+            fp.add_floor({'name': str(i), 'building_id': buildings[i % 4]})
             return True
         except FloorplanError:
             return False
     with ThreadPoolExecutor(max_workers=8) as pool:
-        assert sum(pool.map(add, range(30))) == 20
+        assert sum(pool.map(add, range(80))) == 60
 
 
 @pytest.mark.parametrize('make,ctype', [(png, 'image/png'), (jpeg, 'image/jpeg'), (webp, 'image/webp'),
