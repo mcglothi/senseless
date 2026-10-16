@@ -3,7 +3,7 @@ import { C, MONO, alpha, glow, useTheme } from '../../ui/theme'
 import { SectionTitle, Empty, toast } from '../../ui/primitives'
 import { busyTyping } from '../../api/api'
 import { fmtClock, fmtInt } from '../../ui/format'
-import { Cycles } from './Cycles'
+import { Cycles, NamedCycleCard, useCycles } from './Cycles'
 import { existingNames, fingerprintPath, fmtDuration, groupNamed, inboxOf, legsLabel, nameIdeas } from '../../ui/loads'
 
 // Loads: the patterns detection found, an inbox of the ones worth naming, and the ones
@@ -122,6 +122,8 @@ export function LoadsView({ loads }) {
   const { patterns, name, ignore, error, computed_at } = loads
   const inbox = useMemo(() => inboxOf(patterns), [patterns])
   const named = useMemo(() => groupNamed(patterns), [patterns])
+  const cyc = useCycles()
+  const namedCycles = cyc.patterns.filter(p => p.name && !p.ignored)
   const running = useMemo(() => patterns.filter(p => p.running && !p.ignored), [patterns])
   const ignoredCount = patterns.filter(p => p.ignored && !p.name).length
   const [focus, setFocus] = useState(0)
@@ -176,7 +178,7 @@ export function LoadsView({ loads }) {
         </div>
       )}
 
-      <Cycles />
+      <Cycles data={cyc} />
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: sp(18), alignItems: 'flex-start' }}>
         <section aria-label="Inbox" style={{ flex: '3 1 520px', minWidth: 0, background: C.panel, border: `1px solid ${alpha(C.accent, '40')}`,
@@ -198,13 +200,15 @@ export function LoadsView({ loads }) {
         </section>
 
         <section aria-label="Named loads" style={{ flex: '2 1 340px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <SectionTitle style={{ margin: 0 }}>Named · {named.length}</SectionTitle>
-          {named.length === 0 ? (
+          <SectionTitle style={{ margin: 0 }}>Named · {named.length + namedCycles.length}</SectionTitle>
+          {named.length + namedCycles.length === 0 ? (
             <div style={{ fontFamily: MONO, fontSize: 12, color: C.muted, padding: 12 }}>
               Nothing named yet. Name a pattern in the inbox and every future match gets that name.
             </div>
           ) : (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 260px), 1fr))', gap: 14 }}>
+              {namedCycles.map(p => <NamedCycleCard key={`c${p.id}`} p={p} onName={cyc.name}
+                recent={cyc.cycles.filter(c => c.pattern === p.id).sort((a, b) => b.start_ts - a.start_ts)} />)}
               {named.map(p => <NamedCard key={p.id} p={p} onRename={rename} />)}
             </div>
           )}
