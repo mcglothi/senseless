@@ -12,6 +12,7 @@ from aiohttp import web
 from . import summary
 from .appearance import Appearance, AppearanceError
 from .circuits import CircuitError, Circuits
+from .floorplans import FloorplanError, Floorplans, IMAGE_TYPES, MAX_IMAGE_BYTES
 from .history import History, HistoryError
 from .state import CLOSE, LiveState
 
@@ -161,7 +162,8 @@ def _web_dir() -> Path | None:
 
 
 def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None,
-             detector=None, circuits: Circuits | None = None, history: History | None = None) -> web.Application:
+             detector=None, circuits: Circuits | None = None, history: History | None = None,
+             floorplans: Floorplans | None = None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
@@ -357,6 +359,79 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             raise web.HTTPNotFound(text="no such circuit")
         return web.json_response({"ok": True})
 
+    # ── floor plans ────────────────────────────────────────────────────────
+    def _fp():
+        if floorplans is None:
+            raise web.HTTPNotFound(text="floor plans not configured")
+        return floorplans
+
+    def floorplan_handler(operation, *, write=False, delete=False):
+        async def handler(req):
+            try:
+                args = []
+                if "id" in req.match_info:
+                    try:
+                        args.append(int(req.match_info["id"]))
+                    except ValueError:
+                        raise FloorplanError("id must be an integer") from None
+                if write:
+                    args.append(await _body(req))
+                if delete:
+                    origin = req.headers.get("Origin")
+                    if origin and origin.split("://", 1)[-1] != req.host:
+                        raise web.HTTPForbidden(text="cross-origin write refused")
+                result = await asyncio.to_thread(getattr(_fp(), operation), *args)
+                return web.json_response({"ok": True} if delete else result)
+            except web.HTTPBadRequest as e:
+                return _bad(e.text)
+            except FloorplanError as e:
+                return _bad(e)
+            except KeyError:
+                raise web.HTTPNotFound(text="no such floor, room, marker or image") from None
+        return handler
+
+    async def floor_image_put(req):
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        try:
+            if req.headers.get("X-Senseless-Upload") != "1":
+                raise FloorplanError("X-Senseless-Upload: 1 required")
+            if req.content_type not in IMAGE_TYPES:
+                raise FloorplanError("expected image/png, image/jpeg or image/webp")
+            if req.content_length is not None and req.content_length > MAX_IMAGE_BYTES:
+                raise FloorplanError("image exceeds 15 MiB")
+            data = bytearray()
+            async for chunk in req.content.iter_chunked(64 * 1024):
+                if len(data) + len(chunk) > MAX_IMAGE_BYTES:
+                    raise FloorplanError("image exceeds 15 MiB")
+                data.extend(chunk)
+            try:
+                ident = int(req.match_info["id"])
+            except ValueError:
+                raise FloorplanError("id must be an integer") from None
+            return web.json_response(await asyncio.to_thread(_fp().put_image, ident, data, req.content_type))
+        except FloorplanError as e:
+            return _bad(e)
+        except KeyError:
+            raise web.HTTPNotFound(text="no such floor") from None
+
+    async def floor_image_get(req):
+        try:
+            try:
+                ident = int(req.match_info["id"])
+            except ValueError:
+                raise FloorplanError("id must be an integer") from None
+            path = await asyncio.to_thread(_fp().image, ident)
+            return web.FileResponse(path, headers={
+                "Cache-Control": "max-age=31536000, immutable",
+                "X-Content-Type-Options": "nosniff",
+            })
+        except FloorplanError as e:
+            return _bad(e)
+        except KeyError:
+            raise web.HTTPNotFound(text="no such floor image") from None
+
     # ── history (Sense cloud, cached) ───────────────────────────────────────
     async def history_get(req):
         if history is None:
@@ -380,7 +455,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
     app.add_routes([
         web.get("/", index), web.get("/status", legacy),
         # client-side routes: reloading them must serve the app, not 404
-        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt")],
+        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt", "/map")],
         web.get("/healthz", healthz), web.get("/metrics", metrics),
         web.get("/api/status", status), web.get("/api/deltas", deltas), web.get("/api/readings", readings),
         web.get("/api/today", today), web.get("/api/series", series), web.get("/api/baseline", baseline_get), web.get("/api/stream", stream),
@@ -392,6 +467,18 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.get("/api/circuits", circuits_get), web.post("/api/circuits", circuits_add),
         web.delete("/api/circuits/{id}", circuits_remove),
         web.get("/api/history", history_get),
+        web.get("/api/floors", floorplan_handler("all")),
+        web.post("/api/floors", floorplan_handler("add_floor", write=True)),
+        web.patch("/api/floors/{id}", floorplan_handler("update_floor", write=True)),
+        web.delete("/api/floors/{id}", floorplan_handler("remove_floor", delete=True)),
+        web.put("/api/floors/{id}/image", floor_image_put),
+        web.get("/api/floors/{id}/image", floor_image_get),
+        web.post("/api/floors/{id}/rooms", floorplan_handler("add_room", write=True)),
+        web.patch("/api/rooms/{id}", floorplan_handler("update_room", write=True)),
+        web.delete("/api/rooms/{id}", floorplan_handler("remove_room", delete=True)),
+        web.post("/api/floors/{id}/markers", floorplan_handler("add_marker", write=True)),
+        web.patch("/api/markers/{id}", floorplan_handler("update_marker", write=True)),
+        web.delete("/api/markers/{id}", floorplan_handler("remove_marker", delete=True)),
     ])
     if web_dir and (web_dir / "assets").is_dir():
         app.router.add_static("/assets", web_dir / "assets", append_version=False)
@@ -404,9 +491,10 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
 
 
 async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None,
-                circuits: Circuits | None = None, history: History | None = None) -> web.AppRunner:
+                circuits: Circuits | None = None, history: History | None = None,
+                floorplans: Floorplans | None = None) -> web.AppRunner:
     # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
-    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits, history=history),
+    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits, history=history, floorplans=floorplans),
                              access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))

@@ -96,13 +96,35 @@ are rounded to one decimal. Appearance and circuit validation errors return
 400 with `{error}`. Their routes return 404 when the corresponding service is
 not configured. These settings, circuits and patterns live in `settings.db`.
 
+## Floor plans
+
+Floors, rooms and markers live in `settings.db`; images in `<data dir>/floorplans/`. Coordinates are
+fractions (0–1) of the image's width and height. Design, validation rules and limits:
+[floorplan-spec.md](floorplan-spec.md).
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/api/floors` | None | Floors ordered by `ord, id`, each with `image_url` (or null), `img_w`, `img_h`, `rooms`, `markers`. |
+| POST | `/api/floors` | `{name}` | The floor. At most 20. |
+| PATCH | `/api/floors/{id}` | `{name?, ord?}` | The floor. |
+| DELETE | `/api/floors/{id}` | None | `{ok: true}`; deletes its rooms, markers and image. |
+| PUT | `/api/floors/{id}/image` | Raw PNG/JPEG/WebP bytes, matching `Content-Type`, header `X-Senseless-Upload: 1` | The floor. Magic bytes must match; at most 15 MB and 12000 px per side. |
+| GET | `/api/floors/{id}/image` | None | The image, `immutable` cache (the URL changes when it's replaced), `nosniff`. |
+| POST | `/api/floors/{id}/rooms` | `{name, x, y, w, h}` | The room (must fit inside the image). |
+| PATCH / DELETE | `/api/rooms/{id}` | Any of `{name, x, y, w, h}` / none | The room / `{ok: true}`. |
+| POST | `/api/floors/{id}/markers` | `{kind: load\|sense\|label, ref?, label?, icon?, x, y}` | The marker. `load` refs a pattern name, `sense` a Sense device id. |
+| PATCH / DELETE | `/api/markers/{id}` | Any of `{x, y, label, icon, ref, floor_id}` / none | The marker / `{ok: true}`. |
+
+The image upload is not JSON: the custom header forces a CORS preflight, so other sites cannot send it,
+and a supplied `Origin` must match the host as below.
+
 ## Write protection
 
-All POST routes call `_body`. It requires `Content-Type: application/json`
+All POST and PATCH routes call `_body`. It requires `Content-Type: application/json`
 (a charset parameter is accepted); otherwise it returns 415. Malformed JSON
 returns 400. Send a JSON object with the documented fields.
 
-POST and DELETE routes reject a supplied `Origin` with 403 if the portion after
+POST, PATCH, PUT and DELETE routes reject a supplied `Origin` with 403 if the portion after
 `://` differs from `req.host`, including its port. This is the code's same-origin
 check: it compares host and port, not scheme. An absent Origin is accepted,
 allowing command-line clients. DELETE routes do not require JSON or a body.
@@ -114,7 +136,7 @@ automatic HEAD handling.
 
 | Method | Path | Parameters | Returns |
 |---|---|---|---|
-| GET | `/`, `/timeline`, `/loads`, `/history`, `/hunt` | None | Built frontend `index.html` with no-cache; if no frontend exists, the legacy status HTML. |
+| GET | `/`, `/timeline`, `/loads`, `/map`, `/history`, `/hunt` | None | Built frontend `index.html` with no-cache; if no frontend exists, the legacy status HTML. |
 | GET | `/status` | None | Legacy status HTML. |
 | GET, HEAD | `/assets/{path}` | Relative asset path | Static files, only when the frontend assets directory exists. |
 | GET | `/manifest.webmanifest`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/apple-touch-icon.png` | None | Corresponding file with `Cache-Control: max-age=86400`; each route is registered only if its file exists. |
