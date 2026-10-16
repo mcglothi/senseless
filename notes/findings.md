@@ -68,3 +68,33 @@ From 5 minutes of feed in one house:
 - Period starts come back at 05:00Z (the EST offset) even during EDT, so Sense's "day" can be shifted by an
   hour from a local day.
 - For this house, October so far: 605 kWh, of which "Always On" 49% and "Other" 40%; Sense names ~11%.
+
+## 2026-10-16: Missed offs can become hours-long mis-pairs
+
+- **Verified by replaying local deltas and checking per-leg readings:** the newest-compatible-on
+  rule still leaves older unmatched ons eligible after newer cycles close. Later unrelated drops
+  can close those stale ons hours later. Some such intervals have sustained leg power below the
+  putative load's on-size, disproving continuous operation.
+- Pairing now retires candidates contradicted by sustained power, including impossible overlap
+  with a newer completed similar cycle (see [detection.md](detection.md)). Synthetic regressions
+  preserve supported long loads and overlapping identical loads; reverting the fix reproduces
+  a false five-hour closed run. No local captures were added to the repository.
+- **Limit:** this is a feasibility check, not appliance identity. High background power, missing
+  readings and starts before the evidence window can leave ambiguous long pairs intact.
+
+## 2026-10-16: Pattern durations catch short-repeaters' long mis-pairs
+
+- **Verified by replaying the local exports:** the sustained-power check still allowed a
+  14,741 s L1 ~56 W pairing, despite that pattern's ~13 s median closed duration. Background
+  consumption can support the putative load for hours without proving its identity.
+- After assignment, unnamed patterns with at least eight closed runs now reject candidates
+  exceeding both 20x the other runs' median and 4x their 95th percentile. Recompute the statistics
+  after rejections. Discard the claimed off and mark the run unresolved; no end is invented.
+- On the supplied replay, runs over 30 minutes fell **23 -> 19** relative to round 1; ten closed
+  duration outliers were rejected overall. To reproduce the round-1 baseline, restore the eleven
+  on-steps preceding the delta export from the saved runs, then replay with the supplied readings.
+  The replay used fresh unnamed patterns; the exports do not include saved pattern names.
+- **Heuristic, not hardware ground truth:** synthetic fixtures preserve normally 20–90 minute
+  histories, sparse histories and named patterns. Removing the new recompute call makes the
+  synthetic four-hour repeater regression fail. Sparse/broad histories still allow some long
+  closures; no raw account captures were added to the repository.

@@ -29,6 +29,15 @@ the most recent compatible on-step on exactly the same legs. The size test is
 `abs(on_w - abs(off_w)) <= max(0.15 * on_w, 20 W)`
 (`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). An unmatched off is discarded.
 
+When readings are available, sustained power below the on-size minus that tolerance
+retires the on as `unresolved` before matching an off. A completed newer compatible
+cycle also retires older candidates if power during their supposed overlap cannot
+support both loads. Evidence uses maxima in fully covered five-second bins, skips
+startup/stages and off transitions, and stays within a frame-counter generation.
+Missing data and isolated dips do not reject runs. For `both`, use total leg power.
+No off time is invented; retired runs contribute zero duration/energy and cannot
+be revived by pattern timing. Supported long runs retain the six-hour pairing limit.
+
 `MAX_RUN_S = 6 * 3600` (6 hours) limits pairing. Before considering an off, the
 detector removes older ons from the pairing candidates. Unclosed runs older than
 6 hours at recompute time are dropped from the result, not retained as unresolved.
@@ -38,7 +47,18 @@ Detection is separate for each frame-counter `generation`. A run cannot close
 across a monitor reboot. Closed duration is `(end_frame - start_frame) / 60`.
 Expiry and open-run age use timestamps instead.
 
-After pattern assignment, `resolve_open_runs` sets the remaining open runs to:
+After pattern assignment, `resolve_closed_runs` rejects extreme duration outliers
+in unnamed patterns with at least eight closed runs. For each candidate, exclude
+that run from the reference durations; require its duration to exceed **both**
+20 times the peers' upper median and four times their nearest-rank 95th percentile.
+Clear the candidate's end frame, end timestamp and off watts, and mark it
+`unresolved`, contributing zero duration/energy. Repeat until no more closures
+are rejected, so rejected outliers cannot keep inflating the reference tail.
+Unassigned runs and named patterns are exempt. No absolute duration ceiling is
+added: patterns that normally run for tens of minutes retain their long runs.
+Rejected offs are not reassigned; they remain ambiguous.
+
+Then `resolve_open_runs` sets the remaining open runs to:
 
 - `running` while age is at most `max(30 s, 3 * median closed duration)` for that
   pattern in the current window. With no closed examples, the limit is 600 s.
@@ -54,7 +74,8 @@ runs. These are estimates, not appliance energy measurements.
 ## Runs to persistent patterns
 
 `WINDOW_S = 48 * 3600`: each recompute reloads the last 48 hours of deltas.
-It rebuilds runs, assigns patterns, resolves open runs, then computes naming hints.
+It rebuilds runs, assigns patterns, rejects closed duration outliers, resolves
+open runs, then computes naming hints.
 Runs are recomputed; pattern IDs and names persist in `settings.db`.
 
 A run can join a pattern only when its legs and stage category match. The category
@@ -130,3 +151,7 @@ size on the same legs, but detection itself keeps them separate.
 - Steps below 30 W, missed deltas, window boundaries and counter resets can hide
   or truncate runs. The timing conversion assumes 60 Hz. Open-run status and
   naming hints need representative examples before they are useful.
+- Duration rejection is statistical evidence, not proof of a missed off. Sparse
+  samples, several outliers inflating the upper tail, or shared patterns with
+  different operating modes can leave long mis-pairs intact. Named patterns are
+  deliberately exempt from this heuristic.

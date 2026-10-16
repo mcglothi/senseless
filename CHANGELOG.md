@@ -2,6 +2,16 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.7.1 (2026-10-16)
+
+### Fixed
+- Detection: small loads no longer show runs lasting hours. An off step used to close a much older on of
+  similar size after the real off was missed, so one "run" swallowed many real cycles (a 56 W relay that
+  runs for seconds showed a 4-hour run). Pairing now checks sustained leg power (the leg must actually stay
+  up by the load's size), and runs far outside their own pattern's durations are marked unresolved. On a
+  6 h production sample, runs over 30 min fell from 29 to 19 and the 5 h false run is gone. Readings are
+  binned in SQL for this, so the per-minute recompute stays light.
+
 ## 0.7.0 (2026-10-16)
 
 ### Added
