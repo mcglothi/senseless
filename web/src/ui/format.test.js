@@ -78,6 +78,15 @@ describe('themes', () => {
     expect(t.l2).toBe('#f7768e')   // the only saturated warm color
     expect(['#2ac3de', '#b4f9f8']).toContain(t.l1)
   })
+  it('keeps small-label text readable (dim >= 4.5:1, faint >= 3:1 on cards)', async () => {
+    const { lum } = await import('./themes')
+    const cr = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05) }
+    for (const th of [senseless, { ...senseless, variant: 'light', palette: { ...senseless.palette, base00: '#f7f6f2', base05: '#1d1c1a', base07: '#000000' } }]) {
+      const t = tokensFor(th)
+      expect(cr(t.dim, t.panel)).toBeGreaterThanOrEqual(4.5)
+      expect(cr(t.faint, t.panel)).toBeGreaterThanOrEqual(3)
+    }
+  })
   it('uses blue for L1 on light themes', () => {
     const light = { ...senseless, variant: 'light', palette: { ...senseless.palette, base00: '#f7f6f2', base05: '#1d1c1a', base07: '#000000', base0D: '#1d4ed8' } }
     expect(tokensFor(light).l1).toBe('#1d4ed8')

@@ -18,6 +18,7 @@ import logging
 import re
 import sqlite3
 import tarfile
+import threading
 import time
 import urllib.request
 from contextlib import contextmanager
@@ -27,6 +28,7 @@ log = logging.getLogger("senseless.appearance")
 
 GALLERY_URL = "https://codeload.github.com/tinted-theming/schemes/tar.gz/refs/heads/spec-0.11"
 GALLERY_TTL = 7 * 86400
+REFRESH_MIN_S = 300       # ?refresh=1 can re-download at most this often
 SLOTS = [f"base0{c}" for c in "0123456789ABCDEF"]
 
 # The default look: Docket's console palette with an energy-amber accent.
@@ -64,7 +66,7 @@ ENUMS = {
     "glow": {"none", "corners", "vignette", "aurora"}, "density": {"compact", "comfortable", "spacious"},
     "motion": {"system", "full", "reduced"},
 }
-RANGES = {"radius": (0, 24), "textureStrength": (0, 30), "glowStrength": (0, 12), "textScale": (80, 140)}
+RANGES = {"radius": (0, 24), "textureStrength": (0, 30), "glowStrength": (0, 30), "textScale": (80, 140)}
 HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
@@ -113,6 +115,8 @@ class Appearance:
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         self.cache = cache_dir / "themes-gallery.json"
         self.fetch = fetch
+        self._fetch_lock = threading.Lock()   # one gallery download at a time
+        self._write_lock = threading.Lock()   # catalog/settings read-modify-write is atomic
 
     @contextmanager
     def _conn(self):
@@ -138,14 +142,19 @@ class Appearance:
         return BUNDLED + installed
 
     def gallery(self, refresh: bool = False) -> dict:
+        with self._fetch_lock:
+            return self._gallery(refresh)
+
+    def _gallery(self, refresh: bool) -> dict:
         cached = None
         if self.cache.exists():
             try:
                 cached = json.loads(self.cache.read_text())
             except ValueError:
                 cached = None
-        fresh = cached and time.time() - cached.get("fetched_at", 0) < GALLERY_TTL
-        if refresh or not fresh:
+        age = time.time() - cached.get("fetched_at", 0) if cached else None
+        stale = age is None or age >= GALLERY_TTL
+        if stale or (refresh and age >= REFRESH_MIN_S):
             try:
                 themes = self.fetch()
                 cached = {"fetched_at": time.time(), "themes": themes}
@@ -159,15 +168,24 @@ class Appearance:
         return cached
 
     def install(self, theme_id: str) -> list[dict]:
+        gallery = self.gallery().get("themes", [])  # may download: outside the write lock
+        with self._write_lock:
+            return self._install(theme_id, gallery)
+
+    def _install(self, theme_id: str, gallery: list[dict]) -> list[dict]:
         if theme_id in BUNDLED_IDS or any(t["id"] == theme_id for t in self._get("themes_installed", [])):
             return self.themes()
-        match = next((t for t in self.gallery().get("themes", []) if t["id"] == theme_id), None)
+        match = next((t for t in gallery if t["id"] == theme_id), None)
         if not match:
             raise AppearanceError(f"no gallery theme {theme_id!r}")
         self._put("themes_installed", self._get("themes_installed", []) + [match])
         return self.themes()
 
     def remove(self, theme_id: str) -> list[dict]:
+        with self._write_lock:
+            return self._remove(theme_id)
+
+    def _remove(self, theme_id: str) -> list[dict]:
         if theme_id in BUNDLED_IDS:
             raise AppearanceError("built-in themes can't be removed")
         self._put("themes_installed", [t for t in self._get("themes_installed", []) if t["id"] != theme_id])
@@ -183,6 +201,10 @@ class Appearance:
         return {**DEFAULTS, **self._get("appearance", {})}
 
     def update(self, patch: dict) -> dict:
+        with self._write_lock:
+            return self._update(patch)
+
+    def _update(self, patch: dict) -> dict:
         if not isinstance(patch, dict):
             raise AppearanceError("expected an object")
         ids = {t["id"] for t in self.themes()}

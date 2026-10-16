@@ -190,6 +190,12 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         return appearance
 
     async def _body(req):
+        # Writes must be JSON from this origin: blocks cross-site "simple" POSTs (text/plain, no preflight)
+        if req.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType(text="expected application/json")
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
         try:
             return await req.json()
         except (ValueError, UnicodeDecodeError):
@@ -212,6 +218,9 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             return _bad(e)
 
     async def themes_remove(req):
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
         try:
             return web.json_response({"themes": _ap().remove(req.match_info["id"])})
         except AppearanceError as e:
@@ -238,7 +247,8 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
 
     app = web.Application()
     app.add_routes([
-        web.get("/", index), web.get("/status", legacy), web.get("/healthz", healthz), web.get("/metrics", metrics),
+        web.get("/", index), web.get("/status", legacy),
+        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt")],  # client-side routes web.get("/healthz", healthz), web.get("/metrics", metrics),
         web.get("/api/status", status), web.get("/api/deltas", deltas), web.get("/api/readings", readings),
         web.get("/api/today", today), web.get("/api/series", series), web.get("/api/stream", stream),
         web.get("/api/themes", themes), web.get("/api/themes/gallery", themes_gallery),

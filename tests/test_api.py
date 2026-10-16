@@ -76,8 +76,25 @@ def test_gallery_serves_stale_cache_when_offline(tmp_path):
         raise OSError("offline")
 
     ap.fetch = boom
+    assert "error" not in ap.gallery(refresh=True)       # refresh within REFRESH_MIN_S: served from cache, no fetch
+    c = json.loads(ap.cache.read_text())
+    c["fetched_at"] -= 3600                               # an hour later the refresh is allowed
+    ap.cache.write_text(json.dumps(c))
     g = ap.gallery(refresh=True)
     assert len(g["themes"]) == 1 and "cached copy" in g["error"]
+
+
+def test_gallery_refresh_is_throttled(tmp_path):
+    calls = []
+
+    def counting():
+        calls.append(1)
+        return fake_gallery()
+
+    ap = Appearance(tmp_path / "t.db", tmp_path, fetch=counting)
+    for _ in range(5):
+        ap.gallery(refresh=True)
+    assert len(calls) == 1
 
 
 def _reading(store, ts, w, frame):
@@ -137,6 +154,13 @@ def test_stream_delivers_snapshot_then_events(tmp_path):
             assert r.status == 200, await r.text()
             assert [t["id"] for t in (await r.json())["themes"]][-1] == "gruvbox-dark-medium"
             assert (await c.delete("/api/themes/gruvbox-dark-medium")).status == 200
+            # cross-site writes are refused: text/plain simple POSTs and foreign Origins
+            assert (await c.post("/api/appearance", data='{"radius": 10}', headers={"Content-Type": "text/plain"})).status == 415
+            assert (await c.post("/api/appearance", json={"radius": 10}, headers={"Origin": "http://evil.example"})).status == 403
+            assert (await c.delete("/api/themes/x", headers={"Origin": "http://evil.example"})).status == 403
+            # client-side routes don't 404 on reload
+            for path in ("/timeline", "/loads", "/history"):
+                assert (await c.get(path)).status == 200
     asyncio.run(run())
 
 

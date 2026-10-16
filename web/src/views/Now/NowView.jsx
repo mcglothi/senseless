@@ -290,8 +290,10 @@ function useDayDeltas(liveDeltas) {
     return () => { alive = false; clearInterval(id) }
   }, [])
   return useMemo(() => {
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0)
+    const since = midnight.getTime() / 1000  // a tab left open overnight must drop yesterday
     const seen = new Set(base.map(d => `${d.frame}:${d.leg}:${d.w}`))
-    return base.concat(liveDeltas.filter(d => !seen.has(`${d.frame}:${d.leg}:${d.w}`)))
+    return base.concat(liveDeltas.filter(d => !seen.has(`${d.frame}:${d.leg}:${d.w}`))).filter(d => d.t >= since)
   }, [base, liveDeltas])
 }
 

@@ -63,6 +63,13 @@ export function legColors(p, light) {
   return { l1, l2 }
 }
 
+// Move color toward fg in small steps until it reaches `min` contrast against every surface.
+export function atLeast(color, fg, surfaces, min) {
+  let c = color
+  for (let t = 0.02; t <= 1.0001 && surfaces.some(s => contrast(c, s) < min); t += 0.02) c = mix(color, fg, Math.min(1, t))
+  return c
+}
+
 export function accentOf(theme, pref) {
   const p = theme.palette
   if (pref && pref.startsWith('#')) return pref
@@ -88,8 +95,10 @@ export function tokensFor(theme, accentPref) {
     text: fg,
     body: mix(fg, bg, 0.14),
     muted: mix(fg, bg, light ? 0.36 : 0.42),
-    dim: mix(fg, bg, light ? 0.56 : 0.66),
-    faint: mix(fg, bg, light ? 0.74 : 0.81),
+    // small labels and axis text: pulled toward the text color until they meet 4.5:1 (dim) and
+    // 3:1 (faint) against cards, so every theme stays readable
+    dim: atLeast(mix(fg, bg, light ? 0.56 : 0.66), fg, [surfaces.bg, surfaces.panel], 4.5),
+    faint: atLeast(mix(fg, bg, light ? 0.74 : 0.81), fg, [surfaces.bg, surfaces.panel], 3),
     red: ok(p.base08), orange: ok(p.base09), amber: ok(p.base0A), green: ok(p.base0B),
     cyan: ok(p.base0C), blue: ok(p.base0D), violet: ok(p.base0E),
     accent: ok(accentOf(theme, accentPref)),
