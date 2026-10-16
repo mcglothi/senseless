@@ -265,3 +265,18 @@ def test_sense_ons_peak_and_edges(tmp_path):
     s.close()
     ons = load_sense_ons(tmp_path / "t.db", 0)
     assert [(o["ts"], o["w"]) for o in ons] == [(11, 1700), (80, 1650)]
+
+
+def test_named_load_metrics(tmp_path):
+    from senseless import web
+    from senseless.detect import Detector
+    from senseless.state import LiveState
+    db = _store_with_runs(tmp_path)
+    det = Detector(db, tmp_path / "settings.db")
+    det.recompute()
+    pid = det.loads(0)[0]["id"]
+    det.patterns.name(pid, 'Aquarium "heater"')
+    text = web.render_metrics(LiveState(), db, det)
+    assert 'senseless_patterns{state="named"} 1' in text
+    assert r'senseless_load_running{load="Aquarium \"heater\"",legs="L2"} 0' in text
+    assert "senseless_load_energy_today_wh{" in text and "senseless_detection_age_seconds" in text

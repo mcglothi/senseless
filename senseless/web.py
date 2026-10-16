@@ -22,7 +22,7 @@ def _esc(s: str) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
 
-def render_metrics(st: LiveState, db_path: Path) -> str:
+def render_metrics(st: LiveState, db_path: Path, detector=None) -> str:
     p = st.latest
     out = []
 
@@ -58,6 +58,22 @@ def render_metrics(st: LiveState, db_path: Path) -> str:
     m("senseless_reconnects_total", "Feed reconnects", "counter", [({}, st.reconnects)])
     size = sum(f.stat().st_size for f in db_path.parent.glob(db_path.name + "*") if f.is_file())
     m("senseless_db_bytes", "SQLite database size incl. WAL", "gauge", [({}, size)])
+    if detector is not None and detector.computed_at:
+        loads = detector.loads(summary.day_bounds()[0])
+        named = {}
+        for p in loads:  # a device can span several patterns that share a name
+            if p["name"]:
+                n = named.setdefault(p["name"], {"running": 0, "wh": 0.0, "legs": p["legs"]})
+                n["running"] |= int(bool(p["running"]))
+                n["wh"] += p["wh_today"]
+        m("senseless_detection_age_seconds", "Seconds since detection last recomputed", "gauge", [({}, round(time.time() - detector.computed_at, 1))])
+        m("senseless_patterns", "Detected load patterns in the window", "gauge",
+          [({"state": s}, sum(1 for p in loads if (p["name"] and s == "named") or (not p["name"] and p["ignored"] and s == "ignored")
+                              or (not p["name"] and not p["ignored"] and s == "unnamed"))) for s in ("named", "unnamed", "ignored")])
+        m("senseless_load_running", "1 while a named load is on", "gauge",
+          [({"load": k, "legs": v["legs"]}, v["running"]) for k, v in sorted(named.items())])
+        m("senseless_load_energy_today_wh", "Energy of a named load since local midnight", "gauge",
+          [({"load": k, "legs": v["legs"]}, round(v["wh"], 1)) for k, v in sorted(named.items())])
     return "\n".join(out) + "\n"
 
 
@@ -150,7 +166,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
     async def metrics(_):
-        return web.Response(text=render_metrics(st, db_path), content_type="text/plain", charset="utf-8")
+        return web.Response(text=render_metrics(st, db_path, detector), content_type="text/plain", charset="utf-8")
 
     async def status(_):
         age = st.message_age()
