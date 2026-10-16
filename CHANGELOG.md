@@ -2,6 +2,13 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.12.1 (2026-10-16)
+
+### Fixed
+- Shared switch-offs only pair loads of at least 100 W each. Small fragments (a washer's agitation steps) were being
+  closed together by coincidence and cluttered the run list: 23 shared closures on a 12-hour replay drop to 4
+  plausible ones, with motors and the washer cycle unchanged.
+
 ## 0.12.0 (2026-10-16)
 
 ### Added

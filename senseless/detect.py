@@ -25,7 +25,6 @@ from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from itertools import islice
 from pathlib import Path
 from statistics import median
 
@@ -38,6 +37,8 @@ PAIR_ABS_W = 20
 SLACK_W = 300           # background uncertainty, also bounded to 30% of the load
 SHARED_OFF_CAP = 12      # at most 66 pairs per unmatched off; 0 disables shared offs
 SHARED_START_S = 600     # shared timer/strip loads must start within ten minutes
+SHARED_MIN_W = 100       # each load in a shared off is at least this big: smaller fragments (a washer's agitation
+                         # steps) paired by coincidence and cluttered the run list
 MAX_RUN_S = 6 * 3600
 CLUSTER_TOL = 0.12
 WINDOW_S = 48 * 3600
@@ -431,10 +432,11 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
                     lst[:] = [(j, older) for j, older in lst if older.running]
         else:
             candidates = []
-            for i, r in islice(reversed(opened.items()), SHARED_OFF_CAP):
-                if s.ts - r.start_ts > MAX_RUN_S:
+            for i, r in reversed(opened.items()):
+                if s.ts - r.start_ts > MAX_RUN_S or len(candidates) >= SHARED_OFF_CAP:
                     break
-                candidates.append((i, r))
+                if r.w >= SHARED_MIN_W:         # small runs neither pair nor use up the cap
+                    candidates.append((i, r))
             pair, rank = None, None
             for a, (i, newer) in enumerate(candidates):
                 for j, older in candidates[a + 1:]:
