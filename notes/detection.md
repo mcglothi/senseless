@@ -29,6 +29,32 @@ the most recent compatible on-step on exactly the same legs. The size test is
 `abs(on_w - abs(off_w)) <= max(0.15 * on_w, 20 W)`
 (`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). An unmatched off is discarded.
 
+Before pairing, an on-step of at least 300 W can be sized by its settled power
+rise instead of the monitor's reported startup surge:
+
+- Baseline: mean on the step's legs from 12 s to 2 s before its first stage.
+- Settled: mean from 6 s to 20 s after its last stage; for `both`, use L1 + L2.
+- Require at least 70% covered time in each window. A covered one-second bin
+  needs finite readings on the relevant legs; missing/invalid bins add no coverage.
+  Bin means are weighted by their overlap with the window, with no gap filling.
+- Skip when another step of absolute size at least 120 W occurs after the first
+  stage through 20 s after the last stage, inclusive at the far end, on exactly
+  the same leg category (`L1`, `L2`, or `both`). The candidate's own merged stages
+  are excluded. An event on a different leg category does not trigger this guard;
+  it can still affect a `both` window's measured rise.
+- If `30 W <= settled - baseline < 0.8 * reported_on_w`, set `run.w` to that rise
+  and `run.inrush_w` to the reported size. Otherwise retain the reported size and
+  leave `inrush_w` null. Preserve the reported `stages` in either case.
+
+Pairing, sustained-power checks, pattern clustering and estimated energy all use
+the adjusted `w`. The existing pairing tolerance and six-hour limit still apply.
+`Detector.recompute` loads one-second means in SQL only around eligible starts,
+coalescing overlapping windows and using the `(generation, frame)` index. The
+five-second maxima used below and cycle energy bins remain unchanged. Raw-reading
+replays/tests compute the same one-second means in Python. Supplying only coarse
+five-second bins without startup means skips adjustment; delta-only databases and
+missing startup readings also retain the original size.
+
 When readings are available, sustained power below the on-size minus that tolerance
 retires the on as `unresolved` before matching an off. A completed newer compatible
 cycle also retires older candidates if power during their supposed overlap cannot
@@ -69,7 +95,7 @@ Then `resolve_open_runs` sets the remaining open runs to:
 
 For even-sized lists, the code uses the upper middle value as its median.
 Running duration uses elapsed timestamp time. Run energy is estimated as
-`on_w * duration_s / 3600` Wh. It assumes constant power, including during staged
+`run.w * duration_s / 3600` Wh. It assumes constant power, including during staged
 startup. Today's energy clips the interval at local midnight and excludes unresolved
 runs. These are estimates, not appliance energy measurements.
 
@@ -92,6 +118,12 @@ window. A named centre stays frozen. The SQL update also guards against a name
 being added while recomputation is in progress. Clearing a name permits later
 centre updates again. Names are trimmed to 60 characters; blank becomes null.
 Naming also clears the ignored flag.
+
+Patterns store `inrush_w` as the median reported surge size among adjusted members
+in this window (the average of the two middle values for an even count), or null
+when there are none. Non-surge members do not enter this median. This field is
+refreshed even for named patterns, whose running-size centre stays frozen. Existing
+settings databases gain the nullable column automatically without changing names.
 
 The stored count `n` is this window's run count, not a lifetime count. `last_seen`
 is the latest assigned run's start timestamp. Pruning deletes only patterns with
@@ -140,6 +172,12 @@ the pattern ID and assignment depend on the other runs and saved patterns.
 
 ## Known limitations
 
+- Settled sizing is a background-subtracted heuristic, not proof of a motor or
+  device identity. Unreported background changes and small switching below the
+  overlap threshold can distort the rise, including creating a false small run
+  from a surge-shaped delta with no sustained load. The pool replay still fails
+  pairing at 901 W versus a 1054 W off, outside 15%; see the dated
+  [replay findings](findings.md#2026-10-16-settled-level-inrush-sizing-replay).
 - Multi-step offs do not combine. A load whose total off arrives as several
   smaller drops may never close. It can become unresolved and later expire.
 - One appliance can split across patterns when its on-size changes by more than

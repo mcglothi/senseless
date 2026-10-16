@@ -153,3 +153,54 @@ From 5 minutes of feed in one house:
   runs in a pattern. Removing all individual closures splits this wash, whose
   mixed program patterns include incidental pairings across a pause. Membership
   nevertheless uses only unclosed supporting candidates. See [cycles.md](cycles.md).
+
+## 2026-10-16: Settled-level inrush sizing replay
+
+- **Verified against local scratch traffic by replay through `Detector` and a
+  temporary SQLite database:** 5,655 deltas and 45,462 readings, ending 14:33:08
+  local time. No raw data or account identifiers were copied into this repository.
+  The appliance labels below come from the task's examples; the well-pump identity
+  remains probable, not established by the detector.
+- The 13:13:12 both-leg start changes from 1,706.7 W, unresolved, zero known
+  runtime/energy to **793.1 W**, closed at 13:15:33, **140.5 s and 30.95 Wh**.
+  Its reported 1,706.7 W is retained as `inrush_w`. The overlap rule uses exact
+  `L1`/`L2`/`both` categories, like run pairing; a single-leg step is not a `both`
+  step for that guard.
+- The 08:31:00 L2 pool start changes from 2,230.3 W to **901.1 W**, with
+  `inrush_w=2230.3`. The requested windows give 919.8 W before and 1,820.9 W
+  settled. It **still does not close** against the approximately −1,054 W off
+  at 14:28:10: the mismatch is about 153 W versus a 135 W tolerance. In both
+  replays the unresolved start has expired out of public runs at 14:33; retained
+  cycle evidence exposes it for diagnosis. Thus the rule alone does not recover
+  the example's expected roughly 6 kWh. Pairing tolerance was not widened.
+- The earlier 08:30:25 merged L2 start (1,271.2 W including its small first
+  stage) adjusts to 93.9 W and pairs with a later small off. That is an example
+  of the heuristic's weakness: background changes can create an apparent rise
+  without establishing that a device really ran. The salt-cell candidate remains
+  536.9 W with no inrush and its prior 13:05:23 closure; this is not a verified
+  appliance attribution either.
+- Public run count is **1,696 before and after**; **10** public runs adjust,
+  or **12** starts when expired unresolved cycle evidence is included. All
+  **22** both-leg dryer-element runs (5.6–6.0 kW; 21 closed, one already
+  unresolved) retain sizes, ends, statuses, duration and energy: 2,840.49 Wh
+  total. Their `inrush_w` values remain null.
+- The washer still forms one L1 envelope, **08:19:38–09:06:00, 219.18 Wh**,
+  with the same ID, peak and duration. It is not completely unchanged: one
+  newly pairable fragment reduces candidates **116 → 115**, supporting
+  unclosed members **109 → 108**, step rate **2.5018 → 2.4802/min**, and
+  median candidate size **442.29 → 441.81 W**. No L2/both cycles appear.
+- **Synthetic validation:** motor surges on either leg and 240 V, clean
+  resistive loads, staged startup, overlap/coverage boundaries, missing/nonfinite
+  data, generation isolation, SQL/raw parity, pattern medians and old settings
+  migration. Disabling settled sizing makes **12 of 29** new regressions fail.
+  The full suite has **507 passes** and **12 sandbox socket-bind failures**
+  (`PermissionError` at `127.0.0.1` bind), with no other failures. The clean
+  cycle-bridge fixture now starts its independent load away from unreported
+  program power boundaries, preserving that fixture's clean-start assumption.
+- **Benchmark:** the supplied `scratchpad/perf/bench.py`, eight replay copies,
+  **333,832 readings / 22,864 deltas** over the 48-hour detection window.
+  Before: **1.16 / 1.15 / 1.14 s** per recompute. After:
+  **1.16 / 1.15 / 1.18 s** (median **1.16 s**). Targeted one-second SQL means
+  preserve the existing five-second cycle-energy bins; memory was approximately
+  111 MB maximum RSS. These timings are local measurements, not a performance
+  guarantee on other hosts.

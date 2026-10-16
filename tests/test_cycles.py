@@ -120,11 +120,13 @@ def test_clean_switching_appliance_is_not_a_cycle(tmp_path):
 def test_clean_closures_cannot_bridge_separate_programs(tmp_path):
     ds, _ = program()
     ds = [d for d in ds if 600 <= d["ts"] <= 1200 or 1800 <= d["ts"] <= 2400]
-    ds += [delta(605 + i * 100 + offset, w)
+    # Keep clean startups' pre/settled windows clear of the program's unreported
+    # power boundaries, so settled sizing doesn't infer a smaller on at 1205.
+    ds += [delta(630 + i * 100 + offset, w)
            for i in range(18) for offset, w in ((0, 1500), (40, -1500))]
     rs = [dict(generation=0, frame=t * 60, ts=t, l2_w=0,
                l1_w=100 + 600 * (600 <= t <= 1200 or 1800 <= t <= 2400)
-               + 1500 * (605 <= t < 2345 and (t - 605) % 100 < 40))
+               + 1500 * (630 <= t < 2370 and (t - 630) % 100 < 40))
           for t in range(420, 2501)]
     found, runs, _ = run_pipeline(tmp_path, ds, rs)
     clean = [r for r in runs if r.w == 1500]

@@ -6,7 +6,8 @@ Pipeline, recomputed over a sliding window (cheap: a few thousand deltas a day):
    size are one 240 V step (legs "both").
 2. **Stages**: same-sign steps on the same legs within STAGE_FRAMES are one multi-stage step
    (a microwave: +299 W, then +1,726 W 90 cycles later).
-3. **Runs**: an "off" step closes the most recent compatible "on" on the same legs (size
+3. **Runs**: covered pre/settled leg means size surge starts by their running level. An
+   "off" step closes the most recent compatible "on" on the same legs (size
    within PAIR_TOL), unless sustained leg power disproves it. Missed offs become unresolved.
 4. **Patterns**: runs are grouped by legs + stage count + size; a run joins the nearest known
    pattern centre within CLUSTER_TOL, else starts a new one. Patterns and their names persist in
@@ -23,6 +24,7 @@ from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median
 
 MIN_STEP_W = 30          # below this the on-board steps are mostly noise floor
 PAIR_240_TOL = 0.25      # L1/L2 size mismatch allowed for one 240 V step
@@ -34,6 +36,10 @@ CLUSTER_TOL = 0.12
 WINDOW_S = 48 * 3600
 PRUNE_AFTER_S = 7 * 86400   # unnamed patterns unseen this long are deleted
 FPS = 60
+INRUSH_MIN_W = 300
+INRUSH_OVERLAP_W = 120
+INRUSH_RATIO = .8
+INRUSH_COVERAGE = .7
 
 
 @dataclass
@@ -50,7 +56,7 @@ class Run:
     start_frame: int
     start_ts: float
     legs: str
-    w: float             # on size (positive)
+    w: float             # settled rise for a surge; otherwise reported on-size (positive)
     stages: list
     end_frame: int | None = None
     end_ts: float | None = None
@@ -61,6 +67,7 @@ class Run:
     status: str = "closed"
     generation: int = 0
     cycle: str | None = None
+    inrush_w: float | None = None  # reported on-size when w was adjusted to the settled rise
 
     @property
     def running(self) -> bool:
@@ -76,6 +83,7 @@ class Run:
         d = self.duration_s(now_ts)
         return {"generation": self.generation, "start_frame": self.start_frame, "start_ts": self.start_ts, "end_frame": self.end_frame,
                 "end_ts": self.end_ts, "legs": self.legs, "w": round(self.w, 1), "off_w": self.off_w,
+                "inrush_w": round(self.inrush_w, 1) if self.inrush_w is not None else None,
                 "stages": self.stages, "duration_s": round(d, 1), "running": self.running, "status": self.status,
                 "wh": round(self.w * d / 3600, 2), "pattern": self.pattern, "cycle": self.cycle}
 
@@ -128,6 +136,77 @@ def merge_stages(steps: list[Step]) -> list[Step]:
 def _compatible(on: Run, off: Step) -> bool:
     diff = abs(on.w - abs(off.w))
     return diff <= max(PAIR_TOL * on.w, PAIR_ABS_W)
+
+
+def startup_candidates(steps: list[Step]):
+    """Unambiguous >=300 W ons, using the detector's exact L1/L2/both leg categories.
+
+    Merged startup stages belong to the candidate itself. Their last frame anchors
+    the settled window, while the baseline stays before the first stage.
+    """
+    switching = {leg: [] for leg in ("L1", "L2", "both")}
+    for i, s in enumerate(steps):
+        if abs(s.w) >= INRUSH_OVERLAP_W:
+            switching[s.legs].extend((s.frame + offset, i) for offset, _ in (s.stages or [(0, s.w)]))
+    for events in switching.values():
+        events.sort()
+    for i, s in enumerate(steps):
+        if s.w < INRUSH_MIN_W:
+            continue
+        last = s.frame + (s.stages[-1][0] if s.stages else 0)
+        stop = last + 20 * FPS
+        events = switching[s.legs]
+        lo = bisect_right(events, (s.frame, math.inf))
+        hi = bisect_right(events, (stop, math.inf))
+        if not any(j != i for _, j in events[lo:hi]):
+            yield s, last
+
+
+class StartupPower:
+    """One-second leg means with covered-time window averaging, within one generation."""
+
+    def __init__(self, readings: list[dict]):
+        if readings and "mean_start" in readings[0]:
+            self.bins = readings
+        else:
+            grouped = {}
+            for row in readings:
+                if row["frame"] >= 0:
+                    grouped.setdefault(row["frame"] // FPS, []).append(row)
+            self.bins = []
+            for k, rows in sorted(grouped.items()):
+                item = {"mean_start": k * FPS}
+                for leg, keys in (("L1", ("l1_w",)), ("L2", ("l2_w",)), ("both", ("l1_w", "l2_w"))):
+                    values = [sum(r[key] for key in keys) if all(
+                        r.get(key) is not None and math.isfinite(r[key]) for key in keys
+                    ) else math.inf for r in rows]
+                    item[leg] = sum(values) / len(values)
+                self.bins.append(item)
+        self.frames = [row["mean_start"] for row in self.bins]
+
+    def mean(self, start: int, end: int, legs: str) -> float | None:
+        lo = bisect_right(self.frames, start - FPS)
+        hi = bisect_left(self.frames, end)
+        covered = total = 0.0
+        for row in self.bins[lo:hi]:
+            value = row[legs]
+            if value is None or not math.isfinite(value):
+                continue
+            width = min(end, row["mean_start"] + FPS) - max(start, row["mean_start"])
+            covered += width
+            total += width * value
+        return total / covered if covered >= INRUSH_COVERAGE * (end - start) else None
+
+    def sizes(self, steps: list[Step]) -> dict[int, float]:
+        out = {}
+        for s, last in startup_candidates(steps):
+            pre = self.mean(s.frame - 12 * FPS, s.frame - 2 * FPS, s.legs)
+            settled = self.mean(last + 6 * FPS, last + 20 * FPS, s.legs)
+            if pre is not None and settled is not None:
+                rise = settled - pre
+                if MIN_STEP_W <= rise < INRUSH_RATIO * s.w:
+                    out[id(s)] = rise
+        return out
 
 
 BUCKET_W = 5.0
@@ -207,7 +286,7 @@ class PowerEvidence:
 
 
 def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = None,
-              keep_expired: bool = False) -> list[Run]:
+              keep_expired: bool = False, *, startup_readings: list[dict] | None = None) -> list[Run]:
     """Close each off with the most recent compatible open on (same legs, size within tolerance).
     Open runs are indexed by legs and 5 W size bucket, so an off only looks at sizes it could match:
     thousands of unmatched ons (missed offs, noise) stay linear instead of quadratic.
@@ -216,11 +295,17 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
     """
     runs: list[Run] = []
     power = PowerEvidence(readings) if readings else None
+    # Five-second maxima/means remain dedicated to pairing/cycles. Never use
+    # a coarse bin straddling the on-step as its pre-start baseline.
+    means = startup_readings if startup_readings is not None else readings or []
+    sizes = StartupPower(means).sizes(steps) if means and "bin_start" not in means[0] else {}
     open_by: dict[str, dict[int, list[tuple[int, Run]]]] = {}
     for s in steps:
         if s.w > 0:
-            r = Run(s.frame, s.ts, s.legs, s.w, s.stages or [(0, round(s.w, 1))], status="running")
-            open_by.setdefault(s.legs, {}).setdefault(int(s.w // BUCKET_W), []).append((len(runs), r))
+            w = sizes.get(id(s), s.w)
+            r = Run(s.frame, s.ts, s.legs, w, s.stages or [(0, round(s.w, 1))], status="running",
+                    inrush_w=s.w if id(s) in sizes else None)
+            open_by.setdefault(s.legs, {}).setdefault(int(w // BUCKET_W), []).append((len(runs), r))
             runs.append(r)
             continue
         x = abs(s.w)
@@ -343,6 +428,8 @@ class Patterns:
             cols = {r[1] for r in db.execute("PRAGMA table_info(patterns)")}
             if "last_seen" not in cols:
                 db.execute("ALTER TABLE patterns ADD COLUMN last_seen REAL")
+            if "inrush_w" not in cols:
+                db.execute("ALTER TABLE patterns ADD COLUMN inrush_w REAL")
 
     @contextmanager
     def _conn(self):
@@ -393,13 +480,14 @@ class Patterns:
             for p in pats:
                 rs = by_id.get(p["id"], [])
                 if not rs:
-                    db.execute("UPDATE patterns SET n=0 WHERE id=?", (p["id"],))
+                    db.execute("UPDATE patterns SET n=0, inrush_w=NULL WHERE id=?", (p["id"],))
                     continue
                 if not p.get("name"):
                     p["center_w"] = sorted(x.w for x in rs)[len(rs) // 2]  # median
                 # the name guard is in SQL: a name set by the API after our snapshot still freezes the centre
-                db.execute("UPDATE patterns SET center_w = CASE WHEN name IS NULL THEN ? ELSE center_w END, n=?, last_seen=? WHERE id=?",
-                           (p["center_w"], len(rs), max(x.start_ts for x in rs), p["id"]))
+                surges = [x.inrush_w for x in rs if x.inrush_w is not None]
+                db.execute("UPDATE patterns SET center_w = CASE WHEN name IS NULL THEN ? ELSE center_w END, n=?, last_seen=?, inrush_w=? WHERE id=?",
+                           (p["center_w"], len(rs), max(x.start_ts for x in rs), median(surges) if surges else None, p["id"]))
             # one-off sizes (noise, rare coincidences) would otherwise pile up forever
             db.execute("DELETE FROM patterns WHERE name IS NULL AND ignored=0 AND n=0 AND coalesce(last_seen, created) < ?",
                        (time.time() - PRUNE_AFTER_S,))
@@ -456,7 +544,7 @@ def load_deltas(db_path: Path, since_ts: float) -> list[dict]:
 
 
 def detect_runs(deltas: list[dict], now_ts: float, readings: list[dict] | None = None,
-                keep_expired: bool = False) -> list[Run]:
+                keep_expired: bool = False, *, startup_readings: list[dict] | None = None) -> list[Run]:
     """Steps and runs per frame-counter generation (frames only compare within one), combined.
     A run spanning a monitor reboot can't close. keep_expired retains missed offs
     as unresolved so the cycle pipeline can use the entire 48-hour window.
@@ -467,12 +555,58 @@ def detect_runs(deltas: list[dict], now_ts: float, readings: list[dict] | None =
     readings_by_gen: dict[int, list[dict]] = {}
     for row in readings or []:
         readings_by_gen.setdefault(row.get("generation", 0), []).append(row)
+    startup_by_gen: dict[int, list[dict]] = {}
+    for row in startup_readings or []:
+        startup_by_gen.setdefault(row.get("generation", 0), []).append(row)
     runs: list[Run] = []
     for gen in sorted(by_gen):
-        for r in pair_runs(to_steps(by_gen[gen]), now_ts, readings_by_gen.get(gen), keep_expired):
+        means = startup_by_gen.get(gen, []) if startup_readings is not None else None
+        for r in pair_runs(to_steps(by_gen[gen]), now_ts, readings_by_gen.get(gen), keep_expired,
+                           startup_readings=means):
             r.generation = gen
             runs.append(r)
     return runs
+
+
+def load_startup_readings(db_path: Path, deltas: list[dict]) -> list[dict]:
+    """SQL one-second means only near eligible starts, using the (generation, frame) index.
+
+    Avoid materializing 48 hours of fine bins or changing five-second cycle energy.
+    Coalesce overlapping windows so each reading is loaded at most once.
+    """
+    by_gen: dict[int, list[dict]] = {}
+    for d in deltas:
+        by_gen.setdefault(d.get("generation", 0), []).append(d)
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    out = []
+    try:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='readings'").fetchone():
+            return []
+        for gen, ds in by_gen.items():
+            windows = []
+            for s, last in startup_candidates(to_steps(ds)):
+                for start, stop in ((s.frame - 12 * FPS, s.frame - 2 * FPS), (last + 6 * FPS, last + 20 * FPS)):
+                    windows.append((max(0, start // FPS * FPS), math.ceil(stop / FPS) * FPS))
+            merged = []
+            for start, stop in sorted(windows):
+                if merged and start <= merged[-1][1]:
+                    merged[-1][1] = max(stop, merged[-1][1])
+                else:
+                    merged.append([start, stop])
+            for start, stop in merged:
+                rows = db.execute("""
+                    SELECT frame / :fps, AVG(l1_w), AVG(l2_w), AVG(l1_w + l2_w),
+                           SUM(l1_w IS NULL), SUM(l2_w IS NULL)
+                    FROM readings WHERE generation=:gen AND frame>=:start AND frame<:stop
+                    GROUP BY frame / :fps ORDER BY frame / :fps""",
+                    {"fps": FPS, "gen": gen, "start": start, "stop": stop})
+                for k, a, b, both, na, nb in rows:
+                    out.append({"generation": gen, "mean_start": k * FPS,
+                                "L1": math.inf if na else a, "L2": math.inf if nb else b,
+                                "both": math.inf if na or nb else both})
+        return out
+    finally:
+        db.close()
 
 
 def load_readings(db_path: Path, since_ts: float) -> list[dict]:
@@ -593,7 +727,8 @@ class Detector:
         since = now_ts - WINDOW_S
         deltas = load_deltas(self.deltas_db, since)
         readings = load_readings(self.deltas_db, since - BASELINE_S)
-        runs = detect_runs(deltas, now_ts, readings)
+        startup = load_startup_readings(self.deltas_db, deltas)
+        runs = detect_runs(deltas, now_ts, readings, startup_readings=startup)
         self.patterns.assign(runs)
         patterns = self.patterns.all()
         named = {p["id"] for p in patterns if p["name"]}
@@ -601,7 +736,7 @@ class Detector:
         resolve_open_runs(runs, now_ts)
         # Retain yesterday's missed offs only as cycle evidence. Temporary pattern
         # assignment must not create/count/prune patterns or change public run status.
-        cycle_runs = detect_runs(deltas, now_ts, readings, keep_expired=True)
+        cycle_runs = detect_runs(deltas, now_ts, readings, keep_expired=True, startup_readings=startup)
         self.patterns.assign(cycle_runs, persist=False)
         resolve_closed_runs(cycle_runs, now_ts, named)
         resolve_open_runs(cycle_runs, now_ts)
