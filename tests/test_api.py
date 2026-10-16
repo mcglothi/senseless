@@ -218,3 +218,28 @@ def test_series_and_deltas_accept_windows(tmp_path):
             rows = await (await c.get(f"/api/series?start={t0 - 86400}&end={t0 + 120}&bucket=1")).json()
             assert len(rows) <= 5000
     asyncio.run(run())
+
+
+def test_circuits_api(tmp_path):
+    from senseless.circuits import Circuits
+
+    async def run():
+        Store(tmp_path / "t.db").close()
+        app = web.make_app(LiveState(), tmp_path / "t.db", circuits=Circuits(tmp_path / "settings.db"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/circuits", json={"breaker": " 14 ", "name": "Basement", "l1_w": -2.0, "l2_w": -612.4})
+            assert r.status == 200
+            row = await r.json()
+            assert row["breaker"] == "14" and row["l2_w"] == -612.4
+            for bad in ({"breaker": "", "l1_w": 0, "l2_w": 0}, {"breaker": "1", "l1_w": "x", "l2_w": 0},
+                        {"breaker": "1", "l1_w": 0, "l2_w": 99999}, {"breaker": "x" * 30, "l1_w": 0, "l2_w": 0}):
+                assert (await c.post("/api/circuits", json=bad)).status == 400, bad
+            for junk in ("[]", "null", "5", '"x"'):
+                r = await c.post("/api/circuits", data=junk, headers={"Content-Type": "application/json"})
+                assert r.status == 400, junk
+            assert len(await (await c.get("/api/circuits")).json()) == 1
+            assert (await c.delete(f"/api/circuits/{row['id']}", headers={"Origin": "http://evil.example"})).status == 403
+            assert (await c.delete(f"/api/circuits/{row['id']}")).status == 200
+            assert (await c.delete(f"/api/circuits/{row['id']}")).status == 404
+            assert (await c.get("/api/circuits")).status == 200
+    asyncio.run(run())
