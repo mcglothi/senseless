@@ -126,24 +126,41 @@ def _compatible(on: Run, off: Step) -> bool:
     return diff <= max(PAIR_TOL * on.w, PAIR_ABS_W)
 
 
+BUCKET_W = 5.0
+
+
 def pair_runs(steps: list[Step], now_ts: float) -> list[Run]:
+    """Close each off with the most recent compatible open on (same legs, size within tolerance).
+    Open runs are indexed by legs and 5 W size bucket, so an off only looks at sizes it could match:
+    thousands of unmatched ons (missed offs, noise) stay linear instead of quadratic."""
     runs: list[Run] = []
-    open_runs: list[Run] = []
+    open_by: dict[str, dict[int, list[tuple[int, Run]]]] = {}
     for s in steps:
         if s.w > 0:
             r = Run(s.frame, s.ts, s.legs, s.w, s.stages or [(0, round(s.w, 1))], status="running")
-            open_runs.append(r)
+            open_by.setdefault(s.legs, {}).setdefault(int(s.w // BUCKET_W), []).append((len(runs), r))
             runs.append(r)
             continue
-        # ons older than MAX_RUN_S can't be closed any more: their off was missed, and a much later
-        # unrelated drop must not turn them into day-long runs
-        open_runs[:] = [r for r in open_runs if s.ts - r.start_ts <= MAX_RUN_S]
-        # most recent compatible open run on the same legs
-        for r in reversed(open_runs):
-            if r.legs == s.legs and _compatible(r, s):
-                r.end_frame, r.end_ts, r.off_w, r.status = s.frame, s.ts, round(s.w, 1), "closed"
-                open_runs.remove(r)
-                break
+        x = abs(s.w)
+        # every on size that _compatible() could accept for this off
+        lo, hi = min(x / (1 + PAIR_TOL), x - PAIR_ABS_W), max(x / (1 - PAIR_TOL), x + PAIR_ABS_W)
+        buckets = open_by.get(s.legs, {})
+        best = None
+        for b in range(int(max(lo, 0) // BUCKET_W), int(hi // BUCKET_W) + 1):
+            lst = buckets.get(b)
+            if not lst:
+                continue
+            # ons older than MAX_RUN_S can't be closed any more (their off was missed): drop them
+            lst[:] = [(i, r) for i, r in lst if s.ts - r.start_ts <= MAX_RUN_S]
+            for i, r in reversed(lst):
+                if _compatible(r, s):
+                    if best is None or i > best[0]:
+                        best = (i, r, b)
+                    break  # lists are in start order: the first compatible from the end is this bucket's newest
+        if best:
+            i, r, b = best
+            r.end_frame, r.end_ts, r.off_w, r.status = s.frame, s.ts, round(s.w, 1), "closed"
+            buckets[b].remove((i, r))
     # unclosed for longer than anything plausibly runs: the off was missed; drop it
     return [r for r in runs if not (r.running and now_ts - r.start_ts > MAX_RUN_S)]
 
@@ -295,10 +312,13 @@ def load_sense_ons(db_path: Path, since_ts: float) -> list[dict]:
         # or creeping up (0 -> 15 -> 100) still counts once
         if w >= ON_W and p < ON_W:
             peak = w
-            for r in rows[i + 1:i + 40]:
+            j = i + 1
+            while j < len(rows):  # the whole 30 s, however many rows that is
+                r = rows[j]
                 if r[1] != dev or r[0] > ts + 30 or (r[3] or 0) < ON_W:
                     break  # stop at the next device, after 30 s, or when it turns off (no next activation)
                 peak = max(peak, r[3] or 0)
+                j += 1
             ons.append({"ts": ts, "name": name, "w": peak})
         prev[dev] = w
     return ons
@@ -307,26 +327,31 @@ def load_sense_ons(db_path: Path, since_ts: float) -> list[dict]:
 def sense_hints(runs: list[Run], ons: list[dict], min_share: float = 0.4, min_matches: int = 2) -> dict[int, dict]:
     """Per pattern: the Sense device whose turn-ons line up with this pattern's runs (start within
     -10..+30 s, Sense lags; size within 40%). Weak labels: shown as a suggestion, never applied."""
-    ons = sorted(ons, key=lambda o: o["ts"])
-    times = [o["ts"] for o in ons]
     from bisect import bisect_left
-    votes: dict[int, dict[str, int]] = {}
+    # global nearest assignment: each Sense turn-on goes to the closest compatible run start (not to
+    # whichever run happened to be processed first), and each run counts a device name at most once
+    starts = sorted(range(len(runs)), key=lambda k: runs[k].start_ts)
+    start_ts = [runs[k].start_ts for k in starts]
     totals: dict[int, int] = {}
-    used: set[int] = set()   # each Sense turn-on corroborates at most one run (the nearest)
-    for r in sorted(runs, key=lambda r: r.start_ts):
+    for r in runs:
         totals[r.pattern] = totals.get(r.pattern, 0) + 1
-        i = bisect_left(times, r.start_ts - 10)
-        best: dict[str, tuple] = {}
-        while i < len(ons) and ons[i]["ts"] <= r.start_ts + 30:
-            o = ons[i]
-            if i not in used and abs(o["w"] - r.w) <= 0.4 * max(r.w, o["w"]):
+    voted: set[tuple[int, str]] = set()
+    votes: dict[int, dict[str, int]] = {}
+    for o in ons:
+        # candidate runs start within 30 s before to 10 s after the onset (Sense lags the real step)
+        j = bisect_left(start_ts, o["ts"] - 30)
+        best = None
+        while j < len(starts) and start_ts[j] <= o["ts"] + 10:
+            r = runs[starts[j]]
+            if abs(o["w"] - r.w) <= 0.4 * max(r.w, o["w"]):
                 gap = abs(o["ts"] - r.start_ts)
-                if o["name"] not in best or gap < best[o["name"]][0]:
-                    best[o["name"]] = (gap, i)
-            i += 1
-        for n, (_, idx) in best.items():
-            used.add(idx)
-            votes.setdefault(r.pattern, {})[n] = votes.setdefault(r.pattern, {}).get(n, 0) + 1
+                if best is None or gap < best[0]:
+                    best = (gap, starts[j])
+            j += 1
+        if best and (best[1], o["name"]) not in voted:
+            voted.add((best[1], o["name"]))
+            pid = runs[best[1]].pattern
+            votes.setdefault(pid, {})[o["name"]] = votes.setdefault(pid, {}).get(o["name"], 0) + 1
     hints = {}
     for pid, v in votes.items():
         name, n = max(v.items(), key=lambda kv: kv[1])
