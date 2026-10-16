@@ -40,8 +40,10 @@ be revived by pattern timing. Supported long runs retain the six-hour pairing li
 
 `MAX_RUN_S = 6 * 3600` (6 hours) limits pairing. Before considering an off, the
 detector removes older ons from the pairing candidates. Unclosed runs older than
-6 hours at recompute time are dropped from the result, not retained as unresolved.
-An off at exactly 6 hours can still pair.
+6 hours at recompute time are dropped by standalone `detect_runs` by default.
+`Detector.recompute` retains them as unresolved for the full 48-hour window so
+yesterday's [program cycles](cycles.md) can still be detected. This does not extend
+pairing or count unresolved energy. An off at exactly 6 hours can still pair.
 
 Detection is separate for each frame-counter `generation`. A run cannot close
 across a monitor reboot. Closed duration is `(end_frame - start_frame) / 60`.
@@ -75,7 +77,7 @@ runs. These are estimates, not appliance energy measurements.
 
 `WINDOW_S = 48 * 3600`: each recompute reloads the last 48 hours of deltas.
 It rebuilds runs, assigns patterns, rejects closed duration outliers, resolves
-open runs, then computes naming hints.
+open runs, rebuilds [cycles and cycle membership](cycles.md), then computes naming hints.
 Runs are recomputed; pattern IDs and names persist in `settings.db`.
 
 A run can join a pattern only when its legs and stage category match. The category

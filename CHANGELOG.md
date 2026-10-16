@@ -2,6 +2,15 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.11.0 (2026-10-16)
+
+### Added
+- **Cycles**: appliances that run a program (washers, dishwashers) are detected as one event instead of dozens
+  of fragments. A burst of steps on the same legs, confirmed by the leg's power staying up, becomes a cycle
+  with its duration, energy and a fingerprint; similar cycles share a pattern you name on the Loads page
+  (with suggestions). Fragment patterns leave the inbox. API: `/api/cycles`, `/api/cycle-patterns`
+  (+ `/name`, `/ignore`); `/api/loads` patterns gain `part_of_cycles`, `/api/runs` rows gain `cycle`.
+
 ## 0.10.0 (2026-10-16)
 
 ### Added

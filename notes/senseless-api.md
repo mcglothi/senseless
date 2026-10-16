@@ -10,7 +10,7 @@ There is no authentication in `make_app`. The write checks below are not login.
 
 ## Time windows
 
-`/api/deltas`, `/api/series` and `/api/runs` accept Unix seconds `start` and `end`
+`/api/deltas`, `/api/series`, `/api/runs` and `/api/cycles` accept Unix seconds `start` and `end`
 for a half-open interval `[start, end)`. If either is supplied, `minutes` is ignored.
 Missing `end` means now; missing `start` means the route's default span before end.
 Otherwise, `minutes` selects a span ending now. A span over the route's cap moves
@@ -21,6 +21,7 @@ start forward. Non-numeric values or `end <= start` return 400.
 | `/api/deltas` | 10 minutes | 24 hours |
 | `/api/series` | 30 minutes | 7 days |
 | `/api/runs` | 180 minutes | 48 hours |
+| `/api/cycles` | 180 minutes | 48 hours |
 
 `/api/readings` accepts only `minutes` (default 10, capped at 360). It selects
 `ts > now - minutes * 60`. Its helper checks numeric conversion and the upper cap,
@@ -31,7 +32,7 @@ but does not enforce positive minutes.
 | Method | Path | Parameters | Returns |
 |---|---|---|---|
 | GET | `/healthz` | None | `{healthy, age}`. HTTP 200 when healthy, 503 otherwise. Age is seconds since the last realtime update, or null. |
-| GET | `/metrics` | None | Prometheus text: feed health, power per leg, counters, database size; detection metrics when available: `senseless_load_running{load,legs}`, `senseless_load_energy_today_wh{load,legs}`, `senseless_patterns{state}`, `senseless_detection_age_seconds`. |
+| GET | `/metrics` | None | Prometheus text: feed health, power per leg, counters, database size; detection metrics when available: `senseless_load_running{load,legs}`, `senseless_load_energy_today_wh{load,legs}`, `senseless_patterns{state}`, `senseless_detection_age_seconds`, `senseless_cycles_today{name}`. |
 | GET | `/api/status` | None | `healthy`, `connected`, `monitor_online`, `last_message_age_seconds`, `uptime_seconds`, `reconnects`, `latest` feed payload. |
 | GET | `/api/deltas` | Time window | Array of `ts`, `start_frame`, `frame`, `channel`, signed `w`; ordered by start frame. |
 | GET | `/api/readings` | `minutes` | Array of stored reading rows, ordered by frame. Fields: `generation`, `frame`, `ts`, `recv_ts`, `w`, `l1_w`, `l2_w`, `l1_v`, `l2_v`, `hz`, `grid_w`, `solar_w`. |
@@ -57,14 +58,39 @@ These routes return 404 when detection is not running.
 | GET | `/api/runs` | Time window | Array of overlapping runs. For unresolved runs, only the start counts toward inclusion. |
 | POST | `/api/loads/{id}/name` | Integer pattern ID; JSON `{ "name": "Microwave" }` | Updated stored pattern row. Null, blank or omitted name clears it. Names must be strings or null; trimmed to 60 characters. Clears ignored state. |
 | POST | `/api/loads/{id}/ignore` | Integer pattern ID; JSON `{ "ignored": true }` | Updated stored pattern row. Omitted `ignored` defaults to true; supplied values use Python truth conversion. |
+| GET | `/api/cycles` | Time window | Array of overlapping cycle envelopes with pattern ID and current name. |
+| GET | `/api/cycle-patterns` | None | `{computed_at, patterns}`: saved cycle pattern centres plus today's/48-hour statistics. |
+| POST | `/api/cycle-patterns/{id}/name` | Integer cycle pattern ID; JSON `{ "name": "Washer" }` | Updated stored row; string or null, trimmed to 60 characters. Null, blank or omitted clears name; naming clears ignored state. |
+| POST | `/api/cycle-patterns/{id}/ignore` | Integer cycle pattern ID; JSON `{ "ignored": true }` | Updated stored row. Boolean required; omitted defaults to true. |
 
 Stored pattern fields are `id`, `legs`, `stages`, `center_w`, `n`, `name`, `ignored`,
 `created`, `named_at`, `last_seen`. Load responses also include `runs_window`,
 `runs_today`, `wh_today`, `wh_window`, `last_ts`, `running`, `example`,
-`median_duration_s`, `closed_runs`, `sense_hint`.
+`median_duration_s`, `closed_runs`, `sense_hint`, `cycle_runs`, `part_of_cycles`.
+`part_of_cycles` is true when at least 70% of the pattern's window runs are cycle
+members. All rows remain available and nameable; an inbox client can hide flagged
+fragments and offer an expanded view. The frontend has not yet adopted this flag.
 Run fields are `generation`, `start_frame`, `start_ts`, `end_frame`, `end_ts`,
-`legs`, `w`, `off_w`, `stages`, `duration_s`, `running`, `status`, `wh`, `pattern`.
+`legs`, `w`, `off_w`, `stages`, `duration_s`, `running`, `status`, `wh`, `pattern`,
+`cycle` (cycle ID string or null).
 Invalid pattern IDs return 400; unknown IDs return 404.
+
+Cycle fields: `id` (`generation:legs:start_frame`, stable while the burst start
+stays in the window), `generation`, `start_frame`, `start_ts`, `end_ts`, `duration_s`,
+`legs`, `steps`, `step_rate` (per minute), `median_step_w`, `p90_step_w`, `energy_wh`,
+`peak_w`, `has_heat`, `member_run_keys` (arrays of generation, start frame, legs),
+`pattern` (cycle pattern ID), `name`. Energy and peak are above the two-minute
+pre-burst leg baseline. End is the last candidate on-step, not a verified off.
+
+Stored cycle pattern fields: `id`, `legs`, `duration_s`, `energy_wh`, `step_rate`,
+`median_step_w`, `n`, `name`, `ignored`, `created`, `named_at`, `last_seen`.
+Statistics add `cycles_today`, `cycles_window`, `kwh_today`, `kwh_window`,
+`median_duration_s`. Counts use cycle start; today's energy apportions total
+cycle energy by duration after local midnight. `n` is the current window count;
+`last_seen` is the most recent cycle start. Named patterns remain listed with
+zero counts when absent. The metric `senseless_cycles_today{name}` sums start
+counts of all cycle patterns sharing a name, including ignored named patterns.
+See [cycles.md](cycles.md) for detection rules and energy limitations.
 
 ## Appearance and breaker map
 

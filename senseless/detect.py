@@ -60,6 +60,7 @@ class Run:
     # off (missed off or implausible pairing: Sense's on/off steps aren't always symmetric).
     status: str = "closed"
     generation: int = 0
+    cycle: str | None = None
 
     @property
     def running(self) -> bool:
@@ -76,7 +77,7 @@ class Run:
         return {"generation": self.generation, "start_frame": self.start_frame, "start_ts": self.start_ts, "end_frame": self.end_frame,
                 "end_ts": self.end_ts, "legs": self.legs, "w": round(self.w, 1), "off_w": self.off_w,
                 "stages": self.stages, "duration_s": round(d, 1), "running": self.running, "status": self.status,
-                "wh": round(self.w * d / 3600, 2), "pattern": self.pattern}
+                "wh": round(self.w * d / 3600, 2), "pattern": self.pattern, "cycle": self.cycle}
 
 
 def to_steps(deltas: list[dict]) -> list[Step]:
@@ -134,8 +135,9 @@ POWER_BIN_FRAMES = 5 * FPS
 
 
 def bin_readings(readings: list[dict]) -> list[dict]:
-    """Per POWER_BIN_FRAMES bin with enough coverage: each leg's maximum power (inf if any value is
-    missing). Same rule as load_readings' SQL, for raw rows."""
+    """Covered five-second maxima (pairing) and means (cycle energy).
+    Missing/nonfinite values invalidate that leg. Same rule as load_readings' SQL.
+    """
     bins: dict[int, list[dict]] = {}
     for row in readings:
         if row["frame"] >= 0:   # frame counters are never negative; skipped in the SQL path too
@@ -154,6 +156,7 @@ def bin_readings(readings: list[dict]) -> list[dict]:
                 row.get(k) is not None and math.isfinite(row[k]) for k in keys
             ) else math.inf for row in rows]
             item[leg] = max(values)
+            item[leg + "_mean"] = sum(values) / len(values)
         out.append(item)
     return out
 
@@ -203,7 +206,8 @@ class PowerEvidence:
         return False
 
 
-def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = None) -> list[Run]:
+def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = None,
+              keep_expired: bool = False) -> list[Run]:
     """Close each off with the most recent compatible open on (same legs, size within tolerance).
     Open runs are indexed by legs and 5 W size bucket, so an off only looks at sizes it could match:
     thousands of unmatched ons (missed offs, noise) stay linear instead of quadratic.
@@ -255,8 +259,14 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
                             if power.contradicts(r, s.frame, extra_floor=floor):
                                 older.status = "unresolved"
                     lst[:] = [(j, older) for j, older in lst if older.running]
-    # Preserve the existing six-hour expiry, including power-retired ons.
-    runs = [r for r in runs if r.end_frame is not None or now_ts - r.start_ts <= MAX_RUN_S]
+    # Pairing still expires at six hours. The cycle pipeline retains old unresolved
+    # starts for 48-hour activity/membership; standalone run detection drops them.
+    if keep_expired:
+        for r in runs:
+            if r.end_frame is None and now_ts - r.start_ts > MAX_RUN_S:
+                r.status = "unresolved"
+    else:
+        runs = [r for r in runs if r.end_frame is not None or now_ts - r.start_ts <= MAX_RUN_S]
     if power is not None and readings:
         end = max(row["frame"] if "frame" in row else row["bin_start"] + POWER_BIN_FRAMES for row in readings) + STAGE_FRAMES
         for r in runs:
@@ -351,8 +361,8 @@ class Patterns:
     def _snapshot(self, db) -> list[dict]:
         return [dict(r) for r in db.execute("SELECT * FROM patterns")]
 
-    def assign(self, runs: list[Run]) -> None:
-        """Give every run a pattern id, creating patterns as needed. Named patterns' centres stay put."""
+    def assign(self, runs: list[Run], *, persist: bool = True) -> None:
+        """Assign shapes; cycle-only evidence uses temporary IDs without changing run patterns."""
         with self._write, self._conn() as db:
             pats = self._snapshot(db)
             for r in runs:
@@ -365,11 +375,17 @@ class Patterns:
                     if err <= CLUSTER_TOL and (best_err is None or err < best_err):
                         best, best_err = p, err
                 if best is None:
-                    cur = db.execute("INSERT INTO patterns (legs, stages, center_w, n, created) VALUES (?,?,?,?,?)",
-                                     (r.legs, stages, r.w, 0, time.time()))
-                    best = {"id": cur.lastrowid, "legs": r.legs, "stages": stages, "center_w": r.w, "n": 0, "name": None}
+                    if persist:
+                        cur = db.execute("INSERT INTO patterns (legs, stages, center_w, n, created) VALUES (?,?,?,?,?)",
+                                         (r.legs, stages, r.w, 0, time.time()))
+                        pid = cur.lastrowid
+                    else:
+                        pid = -len(pats) - 1
+                    best = {"id": pid, "legs": r.legs, "stages": stages, "center_w": r.w, "n": 0, "name": None}
                     pats.append(best)
                 r.pattern = best["id"]
+            if not persist:
+                return
             # refresh centres (unnamed only) and counts from this window's runs
             by_id: dict[int, list[Run]] = {}
             for r in runs:
@@ -439,9 +455,12 @@ def load_deltas(db_path: Path, since_ts: float) -> list[dict]:
         db.close()
 
 
-def detect_runs(deltas: list[dict], now_ts: float, readings: list[dict] | None = None) -> list[Run]:
+def detect_runs(deltas: list[dict], now_ts: float, readings: list[dict] | None = None,
+                keep_expired: bool = False) -> list[Run]:
     """Steps and runs per frame-counter generation (frames only compare within one), combined.
-    A run spanning a monitor reboot can't close and expires like any missed off."""
+    A run spanning a monitor reboot can't close. keep_expired retains missed offs
+    as unresolved so the cycle pipeline can use the entire 48-hour window.
+    """
     by_gen: dict[int, list[dict]] = {}
     for d in deltas:
         by_gen.setdefault(d.get("generation", 0), []).append(d)
@@ -450,7 +469,7 @@ def detect_runs(deltas: list[dict], now_ts: float, readings: list[dict] | None =
         readings_by_gen.setdefault(row.get("generation", 0), []).append(row)
     runs: list[Run] = []
     for gen in sorted(by_gen):
-        for r in pair_runs(to_steps(by_gen[gen]), now_ts, readings_by_gen.get(gen)):
+        for r in pair_runs(to_steps(by_gen[gen]), now_ts, readings_by_gen.get(gen), keep_expired):
             r.generation = gen
             runs.append(r)
     return runs
@@ -470,15 +489,17 @@ def load_readings(db_path: Path, since_ts: float) -> list[dict]:
                        frame - LAG(frame) OVER (PARTITION BY generation, frame / :bin ORDER BY frame) AS gap
                 FROM readings WHERE ts >= :since AND frame >= 0)   -- SQLite / truncates, Python // floors
             SELECT g, k, MIN(f), MAX(f), COALESCE(MAX(gap), 0), MAX(a), MAX(b), MAX(a + b),
-                   SUM(a IS NULL), SUM(b IS NULL)
+                   SUM(a IS NULL), SUM(b IS NULL), AVG(a), AVG(b), AVG(a + b)
             FROM r GROUP BY g, k ORDER BY g, k""", {"bin": POWER_BIN_FRAMES, "since": since_ts}).fetchall()
         out = []
-        for g, k, first, last, gap, a, b, both, na, nb in rows:
+        for g, k, first, last, gap, a, b, both, na, nb, ma, mb, mab in rows:
             start = k * POWER_BIN_FRAMES
             if first > start + FPS or last < start + POWER_BIN_FRAMES - FPS or gap > 2 * FPS:
                 continue
             out.append({"generation": g, "bin_start": start, "L1": math.inf if na else a, "L2": math.inf if nb else b,
-                        "both": math.inf if na or nb else both})
+                        "both": math.inf if na or nb else both,
+                        "L1_mean": math.inf if na else ma, "L2_mean": math.inf if nb else mb,
+                        "both_mean": math.inf if na or nb else mab})
         return out
     finally:
         db.close()
@@ -555,24 +576,62 @@ class Detector:
     """Recomputes runs over the window and keeps the latest result for the API."""
 
     def __init__(self, deltas_db: Path, settings_db: Path):
+        from .cycles import CyclePatterns
+
         self.deltas_db = deltas_db
         self.patterns = Patterns(settings_db)
+        self.cycle_patterns = CyclePatterns(settings_db)
+        self.cycles = []
         self.runs: list[Run] = []
         self.hints: dict[int, dict] = {}
         self.computed_at = 0.0
 
     def recompute(self, now_ts: float | None = None) -> None:
+        from .cycles import BASELINE_S, detect_cycles, run_key
+
         now_ts = now_ts if now_ts is not None else time.time()
         since = now_ts - WINDOW_S
-        runs = detect_runs(load_deltas(self.deltas_db, since), now_ts, load_readings(self.deltas_db, since))
+        deltas = load_deltas(self.deltas_db, since)
+        readings = load_readings(self.deltas_db, since - BASELINE_S)
+        runs = detect_runs(deltas, now_ts, readings)
         self.patterns.assign(runs)
-        resolve_closed_runs(runs, now_ts, {p["id"] for p in self.patterns.all() if p["name"]})
+        patterns = self.patterns.all()
+        named = {p["id"] for p in patterns if p["name"]}
+        resolve_closed_runs(runs, now_ts, named)
         resolve_open_runs(runs, now_ts)
+        # Retain yesterday's missed offs only as cycle evidence. Temporary pattern
+        # assignment must not create/count/prune patterns or change public run status.
+        cycle_runs = detect_runs(deltas, now_ts, readings, keep_expired=True)
+        self.patterns.assign(cycle_runs, persist=False)
+        resolve_closed_runs(cycle_runs, now_ts, named)
+        resolve_open_runs(cycle_runs, now_ts)
+        temporary = {}
+        for r in cycle_runs:
+            if r.pattern < 0:
+                temporary.setdefault(r.pattern, []).append(r)
+        cycle_shapes = {pid: dict(id=pid, legs=rs[0].legs, name=None,
+                                 center_w=sorted(r.w for r in rs)[len(rs) // 2])
+                        for pid, rs in temporary.items()}
+        cycles = detect_cycles(deltas, cycle_runs, patterns + list(cycle_shapes.values()), readings, now_ts)
+        membership = {run_key(r): r.cycle for r in cycle_runs}
+        for r in runs:
+            r.cycle = membership.get(run_key(r))
+        self.cycle_patterns.assign(cycles, now_ts)
         try:
             self.hints = sense_hints(runs, load_sense_ons(self.deltas_db, now_ts - WINDOW_S))
         except sqlite3.Error:
             self.hints = {}
-        self.runs, self.computed_at = runs, now_ts
+        self.runs, self.cycles, self.computed_at = runs, cycles, now_ts
+
+    def cycles_between(self, start: float, end: float) -> list[dict]:
+        names = {p["id"]: p["name"] for p in self.cycle_patterns.all()}
+        return [c.as_dict(names.get(c.pattern)) for c in self.cycles
+                if c.start_ts < end and c.end_ts > start]
+
+    def cycle_loads(self, day_start: float) -> list[dict]:
+        from .cycles import pattern_stats
+
+        return pattern_stats(self.cycle_patterns.all(), self.cycles, day_start)
 
     def runs_since(self, since_ts: float) -> list[dict]:
         return self.runs_between(since_ts, time.time() + 1)
@@ -599,8 +658,9 @@ class Detector:
         stats: dict[int, dict] = {}
         for r in self.runs:
             s = stats.setdefault(r.pattern, {"runs_window": 0, "runs_today": 0, "wh_today": 0.0, "wh_window": 0.0, "durations": [],
-                                             "last_ts": 0.0, "running": False, "example": None})
+                                             "last_ts": 0.0, "running": False, "example": None, "cycle_runs": 0})
             s["runs_window"] += 1
+            s["cycle_runs"] += r.cycle is not None
             s["wh_window"] += r.w * r.duration_s(now) / 3600
             if r.status == "closed":
                 s["durations"].append(r.duration_s(now))
@@ -623,9 +683,10 @@ class Detector:
                     continue
                 # named patterns stay listed even when not seen in the window
                 s = {"runs_window": 0, "runs_today": 0, "wh_today": 0.0, "wh_window": 0.0, "durations": [], "last_ts": p.get("last_seen") or 0.0,
-                     "running": False, "example": None}
+                     "running": False, "example": None, "cycle_runs": 0}
             ds = sorted(s.pop("durations"))
             out.append({**p, **s, "sense_hint": self.hints.get(p["id"]), "wh_today": round(s["wh_today"], 1), "wh_window": round(s["wh_window"], 1),
-                        "median_duration_s": round(ds[len(ds) // 2], 1) if ds else None, "closed_runs": len(ds)})
+                        "median_duration_s": round(ds[len(ds) // 2], 1) if ds else None, "closed_runs": len(ds),
+                        "part_of_cycles": bool(s["runs_window"] and s["cycle_runs"] / s["runs_window"] >= .7)})
         out.sort(key=lambda x: (-x["wh_today"], -x["runs_window"]))
         return out

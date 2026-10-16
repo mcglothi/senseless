@@ -3,6 +3,7 @@ import { C, MONO, alpha, glow, useTheme } from '../../ui/theme'
 import { SectionTitle, Empty, toast } from '../../ui/primitives'
 import { busyTyping } from '../../api/api'
 import { fmtClock, fmtInt } from '../../ui/format'
+import { Cycles } from './Cycles'
 import { existingNames, fingerprintPath, fmtDuration, groupNamed, inboxOf, legsLabel, nameIdeas } from '../../ui/loads'
 
 // Loads: the patterns detection found, an inbox of the ones worth naming, and the ones
@@ -174,6 +175,8 @@ export function LoadsView({ loads }) {
           ))}
         </div>
       )}
+
+      <Cycles />
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: sp(18), alignItems: 'flex-start' }}>
         <section aria-label="Inbox" style={{ flex: '3 1 520px', minWidth: 0, background: C.panel, border: `1px solid ${alpha(C.accent, '40')}`,

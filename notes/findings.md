@@ -114,3 +114,42 @@ From 5 minutes of feed in one house:
 - **Still unverified:** Smart Meter Texas and Green Button CSV against real exports. Local timestamps
   during DST gaps/repeated hours need explicit offsets. No jurisdiction-specific holiday calendar is
   inferred. The engine honors explicit holiday flags; CMP keeps its prior holiday approximation.
+
+## 2026-10-16: Washer fragments form one program activity envelope
+
+- **Verified against local traffic by replay through a temporary SQLite database:**
+  3,898 deltas plus 41,862 readings produce one L1 cycle, 08:19:38–09:06:00,
+  122 candidate steps, 219.18 Wh above the two-minute pre-burst baseline.
+  The labeled washer starts approximately 08:21; the grouping includes an earlier
+  nearby step, so these are inferred activity boundaries, not measured appliance offs.
+- A 180 s gap split this wash at a 210 s pause; 240 s joins it. At least half
+  the candidate steps must lack reliable closed runs, alongside the chatter
+  exclusion and sustained power rise. The 5,982 W and 5,601 W late both-leg
+  dryer runs stay closed runs outside cycles; no L2/both or background-only
+  cycles appear. Seventeen fragment patterns meet the 70% cycle-membership flag.
+- Names and cycle patterns persist in `settings.db`. Repeat recomputation
+  after naming preserves the cycle ID and one pattern. See [cycles.md](cycles.md)
+  for rules, full replay results and limits; no raw capture was added to the repo.
+- **Synthetic only:** dishwasher heater stages, other leg configurations and
+  multi-day clustering. Removing chatter exclusion admits a deliberately noisy
+  relay fixture as a false cycle; with the exclusion it yields none.
+
+## 2026-10-16: Cycle review regressions and replay after isolation fixes
+
+- **Verified by rerunning the same scratch capture through temporary SQLite:**
+  still exactly one L1 envelope, 08:19:38–09:06:00, 219.18 Wh; no dryer,
+  L2/both-leg or chatter cycles. Candidate steps are now 120 and supporting
+  unclosed members 109; thirteen public patterns meet the fragment flag.
+- The six-hour expiry pipeline returns 1,369 public runs, versus 1,465 retained
+  cycle-evidence runs. Public runs and persistent pattern IDs/counts/centres
+  match a separate legacy-pipeline replay exactly, apart from cycle membership.
+  Expanded evidence never creates or updates persistent run patterns.
+- **Synthetic regressions, individually falsified by reverting each fix:** saved
+  names/ignores survive a five-to-forty-minute envelope and detector restarts;
+  clean recurring closures cannot bridge two programs; independent closed,
+  named, small and chatter runs retain inbox eligibility; expired missed offs
+  cannot return through run timelines, pattern counts or load statistics.
+- **Heuristic:** reliable repeated closures mean at least three and 80% closed
+  runs in a pattern. Removing all individual closures splits this wash, whose
+  mixed program patterns include incidental pairings across a pause. Membership
+  nevertheless uses only unclosed supporting candidates. See [cycles.md](cycles.md).
