@@ -425,10 +425,11 @@ def test_import_routes_and_guards_without_sockets(tmp_path, caplog):
         b.history = Mock()
         b.history.get.side_effect = HistoryError('private upstream failure')
         put_hours(b, date(2025, 1, 1), date(2025, 1, 2))
+        # Sense's cloud failing must not take the bill down: local readings and meter data carry on
         result = await request('GET', '/api/billing/insights')
-        assert result.status == 502 and 'private upstream failure' not in result.text
+        assert result.status == 200 and 'private upstream failure' not in result.text
         result = await request('GET', '/api/billing/cycle')
-        assert result.status == 502 and 'private upstream failure' not in result.text
+        assert result.status == 200 and 'private upstream failure' not in result.text
     asyncio.run(run())
 
 

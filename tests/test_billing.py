@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -211,3 +211,45 @@ def test_tou_today_priced_by_hour(tmp_path):
     all_on = b.price_today(10, [500 if 17 <= h < 21 else 0 for h in range(24)], thursday)[0]
     assert all_off == pytest.approx(10 * r["marginal_off_cents"] / 100) and all_on == pytest.approx(10 * r["marginal_on_cents"] / 100)
     assert all_on > 2.5 * all_off   # (42.88 + 12.72)¢ vs (6.15 + 12.72)¢
+
+
+def test_cycle_prefers_senseless_readings_and_survives_without_sense(tmp_path):
+    """Senseless's own complete days win over Sense's cloud numbers; a gap falls back to Sense; and with no Sense at
+    all (servers gone) the bill still works from local readings."""
+    clock = datetime(2026, 10, 16, 12, 0, tzinfo=local_tz()).timestamp()
+
+    def local(a, b, now):
+        out = {}
+        d = date(2026, 10, 1)
+        while d <= date(2026, 10, 16):
+            if d != date(2026, 10, 5):                     # a day Senseless missed
+                out[d] = {"kwh": 15.0 if d == date(2026, 10, 16) else 30.0, "coverage": 1.0, "hourly": [1.25] * 24}
+            d += timedelta(days=1)
+        return out
+
+    b = Billing(tmp_path / "s.db", FakeHistory(), clock=lambda: clock, local=local)   # Sense says 40 kWh/day
+    c = b.cycle()
+    by_day = {x["date"]: x for x in c["daily"]}
+    assert by_day["2026-10-02"] == {"date": "2026-10-02", "kwh": 30.0, "source": "senseless"}
+    assert by_day["2026-10-05"]["source"] == "sense" and by_day["2026-10-05"]["kwh"] == 40.0
+    assert by_day["2026-10-16"]["source"] == "senseless"       # today: coverage is of the time elapsed so far
+    assert c["day_sources"] == {"sense": 1, "senseless": 15}
+    gone = Billing(tmp_path / "t.db", None, clock=lambda: clock, local=local)
+    c = gone.cycle()
+    assert c["day_sources"] == {"senseless": 15} and c["kwh_so_far"] == 14 * 30.0 + 15.0
+
+
+def test_local_days_energy_and_coverage(tmp_path):
+    import sqlite3
+    from senseless import summary
+    from senseless.store import Store
+    Store(tmp_path / "r.db")
+    tz = local_tz()
+    start = datetime(2026, 10, 10, 0, 0, tzinfo=tz).timestamp()
+    with sqlite3.connect(tmp_path / "r.db") as db:      # 1 kW for the first 12 hours of the day, every second
+        db.executemany("INSERT INTO readings (generation, frame, ts, w, l1_w, l2_w) VALUES (0, ?, ?, 1000, 500, 500)",
+                       [(i * 60, start + i) for i in range(12 * 3600)])
+    days = summary.local_days(tmp_path / "r.db", start - 86400, start + 2 * 86400, now=start + 2 * 86400, tz=tz)
+    d = days[date(2026, 10, 10)]
+    assert round(d["kwh"], 3) == 12.0 and round(d["coverage"], 3) == 0.5
+    assert d["hourly"][0] == pytest.approx(1.0) and d["hourly"][13] == 0
