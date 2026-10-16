@@ -46,7 +46,12 @@ The hunt runs on the server, so a voice assistant can drive the same session thr
 
 ### Map
 
-Upload a floor plan (a blueprint, a phone photo of a sketch, or a screenshot from any floor-plan app) and put your devices where they live. Each marker is tied to a named load or a live Sense device and lights up when it runs: dim when off, glowing with its watts when on, and a warm aura above 1 kW. Draw rooms to see live watts and today's energy per room, and switch floors to see each floor's live load.
+The map starts with your whole property: the house, the detached garage, the pool house, the greenhouse, the shed. Upload a site plan (an aerial screenshot, a survey, or a sketch of the lot) and draw each building where it sits; every building shows its live load and today's energy, glowing when something big is running. Without a site plan, buildings show as live tiles. Click a building to zoom into it: its floors are stacked by level (basement, ground, upstairs, attic), each with its own plan, rooms and devices. The list view is an outline of everything, building by floor by room, with live totals.
+
+![Property view: buildings on a site plan with live loads](docs/screenshots/property.jpg)
+*The whole property at a glance; click a building to open its floors.*
+
+Inside a building, upload a floor plan (a blueprint, a phone photo of a sketch, or a screenshot from any floor-plan app) and put your devices where they live. Each marker is tied to a named load or a live Sense device and lights up when it runs: dim when off, glowing with its watts when on, and a warm aura above 1 kW. Draw rooms to see live watts and today's energy per room, and switch floors (the floor stack shows each level's live load).
 
 ![Map view: a floor plan with live devices and room totals](docs/screenshots/map.jpg)
 *Rooms light up with what is running in them; tap a device for live watts and today's energy.*
@@ -180,8 +185,8 @@ Your data directory contains:
 | Path | Contents |
 |---|---|
 | `senseless.db` | Realtime readings, on-board deltas, Sense's device power attribution on change, and other feed events. |
-| `settings.db` | Persistent patterns and names, breaker map, floor plans (floors, rooms, markers), billing settings and entered bills, appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
-| `floorplans/` | Uploaded floor plan images. |
+| `settings.db` | Persistent patterns and names, breaker map, the property map (buildings, floors, rooms, markers), billing settings and entered bills, appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
+| `floorplans/` | Uploaded site and floor plan images. |
 | `raw/rt-YYYY-MM-DD.jsonl.gz` | Daily compressed archives of every feed message, enabled by default. |
 | `themes-gallery.json` | Cached theme gallery. |
 | `token.json` (Docker default) | Cached authentication session. Source installs keep it outside the data directory by default; see configuration. |

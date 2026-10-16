@@ -2,6 +2,22 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.9.0 (2026-10-16)
+
+### Added
+- **Property map**: buildings, each with its own floors. `/map` shows the whole property: buildings on an
+  uploaded site plan (draw, move and resize footprints) or as live tiles, each with live watts and today's
+  energy. Click a building to zoom into it (`/map/b/{id}`): breadcrumb and building switcher, floors stacked
+  by level (basement to attic) with live load per level, add floors above or below. The list view is a
+  property-wide outline (building > floor > room > device). Building icons for house, garage, barn, shed,
+  greenhouse, pool house, workshop and office.
+- API: `/api/property` (nested view, site image upload), `/api/buildings` CRUD, floors gain `building_id`
+  and `level`.
+
+### Changed
+- Existing floors move into a "Main house" building automatically (levels from their order); nothing is lost.
+- Limits: up to 50 buildings and 60 floors per property (was 20 floors).
+
 ## 0.8.1 (2026-10-16)
 
 ### Fixed

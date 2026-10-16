@@ -56,9 +56,13 @@ function PropertyView({ fp, property, stateOf, nameOf, planStyle, cyclePlan }) {
   const [tool, setTool] = useState('select')
   const [selected, setSelected] = useState(null)       // {type: 'room', id: buildingId} (buildings are the site's rooms)
   const [listView, setListView] = useState(() => lsGet('senseless.map.plist') === '1')
+  const [sheet, setSheet] = useState(false)            // phone: the bottom sheet is shown (closable while editing)
   const [zoom, setZoom] = useState(null)               // building being zoomed into (transition)
+  const zoomTimer = useRef(null)
+  useEffect(() => () => clearTimeout(zoomTimer.current), [])
   useEffect(() => { lsSet('senseless.map.plist', listView ? '1' : '0') }, [listView])
-  useEffect(() => { if (!edit) { setTool('select'); setSelected(null) } }, [edit])
+  useEffect(() => { if (!edit) { setTool('select'); setSelected(null) } setSheet(edit) }, [edit])
+  useEffect(() => { if (selected) setSheet(true) }, [selected])
   useEffect(() => {
     const onKey = e => {
       if (busyTyping()) return
@@ -77,9 +81,10 @@ function PropertyView({ fp, property, stateOf, nameOf, planStyle, cyclePlan }) {
   const reduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 
   const open = b => {
+    if (zoomTimer.current) return                       // already opening one
     if (reduced || b.x == null) { navigate(mapPath(b.id)); return }
     setZoom(b)                                          // zoom toward the footprint, then switch views
-    setTimeout(() => navigate(mapPath(b.id)), 260)
+    zoomTimer.current = setTimeout(() => navigate(mapPath(b.id)), 260)
   }
   const onSelect = sel => {
     if (!sel) { setSelected(null); return }
@@ -152,7 +157,7 @@ function PropertyView({ fp, property, stateOf, nameOf, planStyle, cyclePlan }) {
             edit={edit} canPlace={!!property.image} onPlace={b => fp.patchBuilding(b.id, defaultFootprint(property)).catch(() => {})}
             onSelect={b => setSelected({ type: 'room', id: b.id })} selectedId={selBuilding?.id} />
           {(property.image || rollup.rooms.length > 0 || edit || !unplaced.length) && (isMobile
-            ? <>{canvas}{panel && <BottomSheet onClose={() => setSelected(null)}>{panel}</BottomSheet>}</>
+            ? <>{canvas}{panel && sheet && <BottomSheet onClose={() => { setSelected(null); setSheet(false) }}>{panel}</BottomSheet>}</>
             : <div style={{ display: 'grid', gridTemplateColumns: panel ? 'minmax(0, 1fr) 320px' : 'minmax(0, 1fr)', gap: sp(14), alignItems: 'start' }}>
                 {canvas}
                 {panel && <Panel style={{ padding: 16, maxHeight: height, overflowY: 'auto' }}>{panel}</Panel>}
@@ -307,12 +312,12 @@ function BuildingView({ fp, property, building, floorId, stateOf, nameOf, loadsB
 
   const floors = building.floors
   const floor = floors.find(f => f.id === floorId) ?? defaultFloor(building)
-  const pickFloor = id => navigate(mapPath(building.id, id), { replace: true })
+  const pickFloor = id => navigate(mapPath(building.id, id))   // Back returns to the previous floor
   useEffect(() => { lsSet('senseless.map.list', listView ? '1' : '0') }, [listView])
   // ?sel=marker:12 (from the property outline) selects once the floor is showing
   useEffect(() => {
     const m = /^(marker|room):(\d+)$/.exec(query.get('sel') || '')
-    if (m && floor) { setSelected({ type: m[1], id: Number(m[2]) }); navigate(mapPath(building.id, floor.id), { replace: true }) }
+    if (m && floor) { setSelected({ type: m[1], id: Number(m[2]) }); setListView(false); navigate(mapPath(building.id, floor.id), { replace: true }) }
   }, [query, floor?.id])
 
   const loadNames = useMemo(() => [...new Set([...loadsByName.values()].map(g => g.name))].sort((a, b) => a.localeCompare(b)), [loadsByName])
@@ -324,7 +329,7 @@ function BuildingView({ fp, property, building, floorId, stateOf, nameOf, loadsB
   useEffect(() => {
     const onKey = e => {
       if (busyTyping()) return
-      if (e.key === 'Escape') { if (placing) setPlacing(null); else if (tool === 'room') setTool('select'); else if (selected) setSelected(null); else if (!edit) navigate('/map') }
+      if (e.key === 'Escape') { if (placing) setPlacing(null); else if (tool === 'room') setTool('select'); else setSelected(null) }
       if (e.key === 'e' && !e.metaKey && !e.ctrlKey && !e.altKey && floor) setEdit(v => !v)
       if (e.key === 'r' && edit && !e.metaKey && !e.ctrlKey && !e.altKey) setTool(t => (t === 'room' ? 'select' : 'room'))
     }
