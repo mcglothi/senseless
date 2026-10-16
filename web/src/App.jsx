@@ -9,6 +9,8 @@ import { useLive, useToday } from './hooks/useLive'
 import { busyTyping } from './api/api'
 import { useLocation } from './router'
 import { NowView } from './views/Now/NowView'
+import { LoadsView } from './views/Loads/LoadsView'
+import { useLoads } from './hooks/useLoads'
 
 export default function App() {
   const { w } = useWindowSize()
@@ -18,6 +20,7 @@ export default function App() {
   const [appearanceOpen, setAppearanceOpen] = useState(false)
   const live = useLive()
   const today = useToday()
+  const loads = useLoads()
   const { path } = useLocation()
 
   // Shift+L flips dark/light anywhere (not while typing)
@@ -42,9 +45,9 @@ export default function App() {
         onOpenAppearance={() => setAppearanceOpen(true)} onToggleMode={toggleMode} />
       <AppearanceDrawer open={appearanceOpen} onClose={() => setAppearanceOpen(false)} appearance={appearance} />
       <main style={{ width: '100%', maxWidth: 1440, margin: '0 auto', padding: isMobile ? sp(14) : `${sp(22)}px ${sp(28)}px ${sp(40)}px` }}>
-        {path === '/' ? <NowView live={live} today={today} /> : (
+        {path === '/' ? <NowView live={live} today={today} loads={loads} /> : path === '/loads' ? <LoadsView loads={loads} /> : (
           <Empty title="Coming soon">
-            This view is on the roadmap (Timeline, Loads, History). The live Now view and theming come first.
+            This view is on the roadmap (Timeline, History).
           </Empty>
         )}
       </main>

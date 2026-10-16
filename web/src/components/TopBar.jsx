@@ -16,7 +16,7 @@ export function Mark({ size = 30 }) {
 export const NAV = [
   { href: '/', label: 'Now' },
   { href: '/timeline', label: 'Timeline', soon: true },
-  { href: '/loads', label: 'Loads', soon: true },
+  { href: '/loads', label: 'Loads' },
   { href: '/history', label: 'History', soon: true },
 ]
 

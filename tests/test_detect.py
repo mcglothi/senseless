@@ -109,3 +109,70 @@ def test_patterns_group_similar_runs_and_names_persist(tmp_path):
     assert named["name"] == "Aquarium heater" and named["n"] == 4
     with pytest.raises(KeyError):
         p.name(9999, "nope")
+
+
+def _store_with_runs(tmp_path):
+    import time as _t
+    from senseless.store import Store
+    s = Store(tmp_path / "senseless.db")
+    now = _t.time()
+    f = 1_000_000
+    for i in range(6):                         # 6 x (45 W on 5 s), recent
+        ts = now - 600 + i * 30
+        s.realtime({"frame": f, "epoch": ts, "w": 1000, "deltas": [{"start_frame": f, "frame": f, "channel": 1, "w": 45}]}, ts)
+        s.realtime({"frame": f + 300, "epoch": ts + 5, "w": 1000, "deltas": [{"start_frame": f + 300, "frame": f + 300, "channel": 1, "w": -45}]}, ts + 5)
+        f += 1800
+    s.close()
+    return tmp_path / "senseless.db"
+
+
+def test_loads_api_name_and_ignore(tmp_path):
+    import asyncio
+    from aiohttp.test_utils import TestClient, TestServer
+    from senseless import web
+    from senseless.detect import Detector
+    from senseless.state import LiveState
+
+    db = _store_with_runs(tmp_path)
+    det = Detector(db, tmp_path / "settings.db")
+    det.recompute()
+
+    async def run():
+        async with TestClient(TestServer(web.make_app(LiveState(), db, detector=det))) as c:
+            loads = (await (await c.get("/api/loads")).json())["patterns"]
+            assert len(loads) == 1 and loads[0]["runs_window"] == 6 and loads[0]["closed_runs"] == 6
+            assert loads[0]["median_duration_s"] == 5.0 and loads[0]["legs"] == "L2"
+            pid = loads[0]["id"]
+            r = await c.post(f"/api/loads/{pid}/name", json={"name": "  Aquarium heater  "})
+            assert r.status == 200 and (await r.json())["name"] == "Aquarium heater"
+            assert (await c.post("/api/loads/9999/name", json={"name": "x"})).status == 404
+            assert (await c.post("/api/loads/abc/name", json={"name": "x"})).status == 400
+            assert (await c.post(f"/api/loads/{pid}/name", json={"name": 5})).status == 400
+            assert (await c.post(f"/api/loads/{pid}/ignore", json={"ignored": True}, headers={"Origin": "http://evil.example"})).status == 403
+            r = await c.post(f"/api/loads/{pid}/ignore", json={"ignored": True})
+            assert (await r.json())["ignored"] == 1
+            runs = await (await c.get("/api/runs?minutes=60")).json()
+            assert len(runs) == 6 and all(x["pattern"] == pid for x in runs)
+    asyncio.run(run())
+
+
+def test_unnamed_unseen_patterns_are_pruned_but_named_kept(tmp_path):
+    import sqlite3, time as _t
+    from senseless.detect import Patterns
+    p = Patterns(tmp_path / "s.db")
+    old = _t.time() - 30 * 86400
+    with sqlite3.connect(tmp_path / "s.db") as db:
+        db.execute("INSERT INTO patterns (legs, stages, center_w, n, created, last_seen) VALUES ('L1',1,77,0,?,?)", (old, old))
+        db.execute("INSERT INTO patterns (legs, stages, center_w, n, created, last_seen, name) VALUES ('L1',1,500,0,?,?,'Kettle')", (old, old))
+    p.assign([])
+    assert [x["name"] for x in p.all()] == ["Kettle"]
+
+
+def test_short_pattern_is_not_running_minutes_later():
+    from senseless.detect import resolve_open_runs
+    deltas = [d(0, 0, 55, 0), d(780, 0, -55, 13), d(1200, 0, 55, 20), d(1980, 0, -55, 33), d(2400, 0, 55, 40)]
+    runs = pair_runs(to_steps(deltas), now_ts=40 + 120)
+    for r in runs:
+        r.pattern = 1
+    resolve_open_runs(runs, now_ts=40 + 120)
+    assert runs[-1].status == "unresolved"   # 13 s median: 2 minutes "on" is a missed off

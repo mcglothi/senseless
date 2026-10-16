@@ -4,6 +4,9 @@ import { SectionTitle } from '../../ui/primitives'
 import { api } from '../../api/api'
 import { WINDOW_S } from '../../hooks/useLive'
 import { find240V, fmtClock, fmtInt, fmtMoney, fmtSigned, legShare, repeatingSteps } from '../../ui/format'
+import { matchStep } from '../../hooks/useLoads'
+import { inboxOf } from '../../ui/loads'
+import { link } from '../../router'
 
 // The live "Now" view: what the house draws this second, today's totals, the last
 // half hour per leg with every step the monitor caught, and what it has spotted.
@@ -172,10 +175,13 @@ function LiveChart({ series, deltas }) {
   )
 }
 
-function Feed({ deltas, pairs, cyclers }) {
-  const rows = deltas.filter(d => Math.abs(d.w) >= 20).slice(-9).reverse()
+function Feed({ deltas, pairs, cyclers, patterns }) {
+  // same 30 W floor as detection: smaller steps are mostly the monitor's noise
+  const rows = deltas.filter(d => Math.abs(d.w) >= 30).slice(-9).reverse()
   const pairFrames = new Set(pairs.map(p => p.frame))
   const tagOf = d => {
+    const p = matchStep(patterns, d, pairFrames.has(d.frame))
+    if (p?.name) return { text: `${p.name} ${d.w > 0 ? 'on' : 'off'}`, color: C.text }
     if (pairFrames.has(d.frame)) return { text: '240 V appliance', color: C.violet }
     const c = cyclers.find(x => x.leg === d.leg && Math.abs(Math.abs(d.w) - x.w) <= 6)
     if (c) return { text: `≈${c.w} W repeater (${c.count}× today)`, color: C.muted }
@@ -205,7 +211,7 @@ function Feed({ deltas, pairs, cyclers }) {
   )
 }
 
-function Spotted({ dayDeltas, pairs, cyclers }) {
+function Spotted({ dayDeltas, pairs, cyclers, inboxCount }) {
   const n1 = dayDeltas.filter(d => d.leg === 1).length, n2 = dayDeltas.length - n1
   const Row = ({ color, big, title, sub }) => (
     <div style={{ display: 'flex', gap: 12, alignItems: 'center', padding: '12px 14px', borderRadius: 12, background: C.field, border: `1px solid ${alpha(color, '45')}` }}>
@@ -233,6 +239,12 @@ function Spotted({ dayDeltas, pairs, cyclers }) {
         <Row key={`${c.leg}-${c.w}`} color={c.leg === 1 ? C.l1 : C.l2} big={`${c.count}×`} title={`${c.w} W repeater on L${c.leg}`} sub="same-size step, over and over · unlabeled" />
       ))}
       {pairs.length === 0 && cyclers.length === 0 && <div style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>Nothing repeating yet today.</div>}
+      {inboxCount > 0 && (
+        <a href="/loads" onClick={link('/loads')} style={{ alignSelf: 'flex-start', fontFamily: MONO, fontSize: 11, letterSpacing: 1, textTransform: 'uppercase',
+          padding: '10px 14px', borderRadius: 8, color: C.accent, background: alpha(C.accent, '14'), border: `1px solid ${alpha(C.accent, '45')}` }}>
+          {inboxCount} pattern{inboxCount > 1 ? 's' : ''} to name →
+        </a>
+      )}
     </Card>
   )
 }
@@ -297,7 +309,7 @@ function useDayDeltas(liveDeltas) {
   }, [base, liveDeltas])
 }
 
-export function NowView({ live, today }) {
+export function NowView({ live, today, loads }) {
   const { sp } = useTheme()
   const { latest, series, deltas } = live
   const dayDeltas = useDayDeltas(deltas)
@@ -317,8 +329,8 @@ export function NowView({ live, today }) {
         <LiveChart series={series} deltas={deltas} />
       </Card>
       <div style={grid(340)}>
-        <Feed deltas={deltas} pairs={pairs} cyclers={cyclers} />
-        <Spotted dayDeltas={dayDeltas} pairs={pairs} cyclers={cyclers} />
+        <Feed deltas={deltas} pairs={pairs} cyclers={cyclers} patterns={loads.patterns} />
+        <Spotted dayDeltas={dayDeltas} pairs={pairs} cyclers={cyclers} inboxCount={inboxOf(loads.patterns).length} />
         <AlwaysOn latest={latest} series={series} today={today} />
       </div>
     </div>

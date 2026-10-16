@@ -29,6 +29,7 @@ PAIR_ABS_W = 20
 MAX_RUN_S = 6 * 3600
 CLUSTER_TOL = 0.12
 WINDOW_S = 48 * 3600
+PRUNE_AFTER_S = 7 * 86400   # unnamed patterns unseen this long are deleted
 FPS = 60
 
 
@@ -144,7 +145,8 @@ def pair_runs(steps: list[Step], now_ts: float) -> list[Run]:
 
 def resolve_open_runs(runs: list[Run], now_ts: float, min_s: float = 600, factor: float = 3) -> None:
     """An unclosed run stays "running" only while younger than factor x its pattern's median closed
-    duration (at least min_s); after that it's "unresolved" and adds no energy."""
+    duration (min_s when the pattern has never been seen closing); after that it's "unresolved"
+    and adds no energy."""
     closed: dict[int, list[float]] = {}
     for r in runs:
         if r.status == "closed":
@@ -153,7 +155,8 @@ def resolve_open_runs(runs: list[Run], now_ts: float, min_s: float = 600, factor
         if r.status == "closed":
             continue
         ds = sorted(closed.get(r.pattern, []))
-        limit = max(min_s, factor * ds[len(ds) // 2]) if ds else min_s
+        # with closed examples: 3x their median (a 13 s pulse isn't "on" after a minute); without: min_s
+        limit = max(30.0, factor * ds[len(ds) // 2]) if ds else min_s
         r.status = "running" if now_ts - r.start_ts <= limit else "unresolved"
 
 
@@ -166,7 +169,10 @@ class Patterns:
             db.execute("""CREATE TABLE IF NOT EXISTS patterns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, legs TEXT NOT NULL, stages INTEGER NOT NULL,
                 center_w REAL NOT NULL, n INTEGER NOT NULL DEFAULT 0, name TEXT, ignored INTEGER NOT NULL DEFAULT 0,
-                created REAL NOT NULL, named_at REAL)""")
+                created REAL NOT NULL, named_at REAL, last_seen REAL)""")
+            cols = {r[1] for r in db.execute("PRAGMA table_info(patterns)")}
+            if "last_seen" not in cols:
+                db.execute("ALTER TABLE patterns ADD COLUMN last_seen REAL")
 
     @contextmanager
     def _conn(self):
@@ -208,10 +214,15 @@ class Patterns:
             for p in pats:
                 rs = by_id.get(p["id"], [])
                 if not rs:
+                    db.execute("UPDATE patterns SET n=0 WHERE id=?", (p["id"],))
                     continue
                 if not p.get("name"):
                     p["center_w"] = sorted(x.w for x in rs)[len(rs) // 2]  # median
-                db.execute("UPDATE patterns SET center_w=?, n=? WHERE id=?", (p["center_w"], len(rs), p["id"]))
+                db.execute("UPDATE patterns SET center_w=?, n=?, last_seen=? WHERE id=?",
+                           (p["center_w"], len(rs), max(x.start_ts for x in rs), p["id"]))
+            # one-off sizes (noise, rare coincidences) would otherwise pile up forever
+            db.execute("DELETE FROM patterns WHERE name IS NULL AND ignored=0 AND n=0 AND coalesce(last_seen, created) < ?",
+                       (time.time() - PRUNE_AFTER_S,))
 
     def name(self, pattern_id: int, name: str | None) -> dict:
         name = (name or "").strip()[:60] or None
@@ -284,7 +295,11 @@ class Detector:
         for p in self.patterns.all():
             s = stats.get(p["id"])
             if not s:
-                continue
+                if not p["name"]:
+                    continue
+                # named patterns stay listed even when not seen in the window
+                s = {"runs_window": 0, "runs_today": 0, "wh_today": 0.0, "durations": [], "last_ts": p.get("last_seen") or 0.0,
+                     "running": False, "example": None}
             ds = sorted(s.pop("durations"))
             out.append({**p, **s, "wh_today": round(s["wh_today"], 1),
                         "median_duration_s": round(ds[len(ds) // 2], 1) if ds else None, "closed_runs": len(ds)})
