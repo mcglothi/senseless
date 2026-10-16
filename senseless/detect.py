@@ -16,6 +16,7 @@ Pipeline, recomputed over a sliding window (cheap: a few thousand deltas a day):
 import json
 import math
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -187,6 +188,9 @@ class Patterns:
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        # assign() (detector thread) and find_or_create() (Device Hunt, event loop) both read-then-insert:
+        # serialized, so they can't each create the same pattern
+        self._write = threading.Lock()
         with self._conn() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS patterns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, legs TEXT NOT NULL, stages INTEGER NOT NULL,
@@ -215,7 +219,7 @@ class Patterns:
 
     def assign(self, runs: list[Run]) -> None:
         """Give every run a pattern id, creating patterns as needed. Named patterns' centres stay put."""
-        with self._conn() as db:
+        with self._write, self._conn() as db:
             pats = self._snapshot(db)
             for r in runs:
                 stages = min(len(r.stages), 2)  # 1 = single step, 2 = multi-stage
@@ -272,7 +276,7 @@ class Patterns:
         if legs not in ("L1", "L2", "both") or w < MIN_STEP_W:
             raise ValueError("legs must be L1, L2 or both and w at least MIN_STEP_W")
         stages = 2 if stages > 1 else 1
-        with self._conn() as db:
+        with self._write, self._conn() as db:
             best, best_err = None, None
             for p in self._snapshot(db):
                 if p["legs"] != legs or p["stages"] != stages:

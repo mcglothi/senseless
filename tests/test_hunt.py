@@ -298,3 +298,66 @@ def test_device_ignores_background_chatter(tmp_path):
     s.tick(deltas=[s.step(2, 38)])
     s.tick(6)
     assert h.phase == "on" and not h.view()["ignoring"]
+
+
+def test_quick_tap_cycle_keeps_its_off(tmp_path):
+    """On and off inside one capture window (a half-second tap) is one full cycle, not a stuck 'on'."""
+    h, s = make(tmp_path)
+    h.start("device")
+    s.settle()
+    s.tick(deltas=[s.step(1, 200)])
+    s.tick(deltas=[s.step(1, -200)])
+    s.tick(6)
+    assert h.phase == "measured" and h.view()["measurement"]["cycles"] == 1
+
+
+def test_stage_count_matches_the_detector(tmp_path):
+    """+300 then +1700 one update later: the detector calls that two stages, so must the hunt."""
+    from senseless.detect import to_steps
+    h, s = make(tmp_path)
+    h.start("device")
+    s.settle()
+    s.tick(deltas=[s.step(1, 300)])
+    s.tick(deltas=[s.step(1, 1700)])
+    s.tick(6)
+    det = to_steps([{"start_frame": 0, "channel": 0, "w": 300, "ts": 0}, {"start_frame": 30, "channel": 0, "w": 1700, "ts": 0.5}])
+    assert len(det) == 1 and len(det[0].stages) == 2
+    assert h.view()["on"]["stages"] == 2
+    out = h.label("Microwave")
+    assert out["pattern"]["stages"] == 2
+
+
+def test_breaker_leg_shift_notifies(tmp_path):
+    """Same total, different legs (now a 240 V breaker): clients must hear about it."""
+    events = []
+    h = Hunt(Circuits(tmp_path / "settings.db"), FakeDetector(tmp_path / "settings.db"), publish=events.append)
+    s = Sim(h)
+    s.tick(8)
+    h.start("breaker")
+    s.settle()
+    # raw steps at constant leg levels: the drop is exactly the steps, so the total never moves
+    s.tick(deltas=[{"channel": 0, "w": -800}])
+    s.tick(6)
+    n = len(events)
+    assert h.view()["drop"]["both"] is False and h.view()["drop"]["total"] == -800
+    s.tick(deltas=[{"channel": 0, "w": 400}, {"channel": 1, "w": -400}])
+    s.tick(6)
+    assert h.view()["drop"]["total"] == -800
+    assert h.view()["drop"]["both"] is True and len(events) > n and events[-1]["hunt"]["drop"]["both"] is True
+
+
+def test_stream_snapshot_carries_hunt(tmp_path):
+    async def go():
+        st = LiveState()
+        h = Hunt()
+        app = web.make_app(st, tmp_path / "t.db", hunt=h)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get("/api/stream")
+            line = (await r.content.readline()).decode()
+            while not line.startswith("data:"):
+                line = (await r.content.readline()).decode()
+            import json
+            snap = json.loads(line[5:])
+            assert snap["hunt"]["phase"] == "idle"
+            st.close_streams()
+    asyncio.run(go())

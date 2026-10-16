@@ -16,6 +16,8 @@ import statistics
 import time
 from collections import deque
 
+from .detect import to_steps
+
 SETTLE_S = 4.0          # let the panel settle after a breaker switches back on
 BASELINE_S = 3.0        # baseline / current-level averaging window
 CAPTURE_S = 2.5         # steps this close together are one switch (240 V legs, multi-stage starts)
@@ -184,7 +186,7 @@ class Hunt:
             return
         self.deltas.extend(steps)
         d = self.drop()
-        key = (d["meaningful"], d["total"] > 0, round(d["total"] / 10))
+        key = (d["meaningful"], d["total"] > 0, round(d["l1"] / 10), round(d["l2"] / 10), d["both"], d["steps"])
         if key != self._drop_key:
             self._drop_key = key
             self._changed()
@@ -260,15 +262,21 @@ class Hunt:
         return legs == "both" or legs == f"L{leg}"
 
     def _took_on(self, cap):
-        ups = [s for s in cap["steps"] if s["w"] > 0]
-        l1 = sum(s["w"] for s in ups if s["leg"] == 1)
-        l2 = sum(s["w"] for s in ups if s["leg"] == 2)
-        if l1 >= MIN_STEP_W and l2 >= MIN_STEP_W and abs(l1 - l2) / max(l1, l2) <= 0.25:
-            legs, w = "both", l1 + l2
-        else:
-            legs, w = ("L1", l1) if l1 >= l2 else ("L2", l2)
-            if min(l1, l2) >= MIN_STEP_W:
-                self.noise += 1      # the other leg also jumped: another load, ignored
+        # classify with the detector's own grouping (240 V pairing, multi-stage starts), so the pattern
+        # we name is the one future runs of this device will join
+        rows = [{"start_frame": x["frame"] if x["frame"] is not None else i, "channel": x["leg"] - 1, "w": x["w"], "ts": x["t"]}
+                for i, x in enumerate(cap["steps"])]
+        ons = [st for st in to_steps(rows) if st.w > 0]
+        if not ons:
+            return
+        best = max(ons, key=lambda st: st.w)
+        legs, w = best.legs, best.w
+        if len(ons) > 1:
+            self.noise += len(ons) - 1   # other loads switching in the same moment, ignored
+        ups = [x for x in cap["steps"] if x["w"] > 0]
+        l1 = sum(x["w"] for x in ups if x["leg"] == 1 and legs in ("L1", "both"))
+        l2 = sum(x["w"] for x in ups if x["leg"] == 2 and legs in ("L2", "both"))
+        groups = max(1, len(best.stages))
         if self.phase == "measured" and (legs != self.cycles[-1]["legs"] or
                                          abs(w - self.cycles[-1]["on_w"]) > max(OFF_TOL * self.cycles[-1]["on_w"], OFF_ABS_W)):
             # another load starting while we wait for a repeat: don't fold it into this device
@@ -276,9 +284,6 @@ class Hunt:
             self.note = f"saw {round(w)} W turn on, which isn't this device; retry to measure a different one"
             self._changed()
             return
-        mine = [s for s in ups if legs == "both" or s["leg"] == int(legs[1])]
-        frames = sorted({s["frame"] for s in mine if s["frame"] is not None})
-        groups = 1 + sum(1 for a, b in zip(frames, frames[1:]) if b - a > 30)
         before = self._level(cap["t"] - BASELINE_S, cap["t"] - 0.01)
         after = self._level(self.t - 1.5, self.t)
         level = None
@@ -288,6 +293,10 @@ class Hunt:
                    "stages": min(groups, 2), "level_change": level, "sense": {}, "sense_base": dict(self.devices)}
         self.phase, self.note = "on", None
         self._changed()
+        # switched off again inside the same window (a quick tap): that's this cycle's off
+        downs = [x for x in cap["steps"] if x["w"] < 0 and self._on_legs(x["leg"])]
+        if downs:
+            self._took_off({"t": downs[0]["t"], "steps": downs})
 
     def _took_off(self, cap):
         downs = [s for s in cap["steps"] if s["w"] < 0 and self._on_legs(s["leg"])]

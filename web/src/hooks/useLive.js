@@ -55,6 +55,7 @@ export function useLive() {
       es.addEventListener('snapshot', e => {
         const snap = JSON.parse(e.data)
         if (snap.latest) setLatest(snap.latest)
+        if (snap.hunt) setHunt(snap.hunt)
         // arm the stale watchdog from the snapshot too: if no update follows, "Live" must not stick
         if (snap.healthy) lastAt.current = Date.now() - (snap.last_message_age_seconds ?? 0) * 1000
         setStatus({ state: 'live', healthy: snap.healthy, monitorOnline: snap.monitor_online })

@@ -281,7 +281,9 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
     def _snapshot():
         age = st.message_age()
         return {"healthy": st.healthy(), "connected": st.connected, "monitor_online": st.monitor_online,
-                "last_message_age_seconds": round(age, 1) if age is not None else None, "latest": st.latest}
+                "last_message_age_seconds": round(age, 1) if age is not None else None, "latest": st.latest,
+                # a reconnecting client may have missed hunt events: give it the current session
+                "hunt": hunt.view() if hunt is not None else None}
 
     # ── appearance (same contract as Docket's) ──────────────────────────────
     def _ap():
