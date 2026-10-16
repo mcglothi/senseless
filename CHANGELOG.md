@@ -2,6 +2,13 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.11.2 (2026-10-16)
+
+### Fixed
+- Loads: a named cycle now moves to the Named column (marked "cycle", with rename) like a named load, instead of
+  staying in the Cycles section where saving its name looked like nothing happened. Cycles lists only unnamed
+  programs; clearing a cycle's name sends it back there.
+
 ## 0.11.1 (2026-10-16)
 
 ### Fixed

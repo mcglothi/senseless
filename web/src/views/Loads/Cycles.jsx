@@ -23,9 +23,10 @@ export function useCycles() {
   return { ...state, name, ignore }
 }
 
-export function Cycles() {
-  const { patterns, cycles, name, ignore } = useCycles()
-  const shown = patterns.filter(p => !p.ignored)
+// Unnamed programs, like the loads inbox; once named, a cycle moves to the Named column (NamedCycleCard).
+export function Cycles({ data }) {
+  const { patterns, cycles, name, ignore } = data
+  const shown = patterns.filter(p => !p.ignored && !p.name)
   if (!shown.length) return null
   return (
     <section aria-label="Cycles" style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -74,6 +75,42 @@ function CycleCard({ p, recent, onName, onIgnore }) {
         <button type="submit" style={{ height: 34, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontFamily: MONO, fontSize: 11, color: C.accent, background: alpha(C.accent, '14'), border: `1px solid ${alpha(C.accent, '50')}` }}>Save</button>
         {!p.name && <button type="button" onClick={() => onIgnore(p.id)} style={{ height: 34, padding: '0 10px', borderRadius: 8, cursor: 'pointer', fontFamily: MONO, fontSize: 11, color: C.dim, background: 'transparent', border: `1px solid ${C.line2}` }}>Ignore</button>}
       </form>
+    </div>
+  )
+}
+
+// A named cycle in the Named column: same place as named loads, marked as a program.
+export function NamedCycleCard({ p, recent, onName }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(p.name)
+  const last = recent[0]
+  const save = async e => {
+    e.preventDefault()
+    const v = draft.trim()
+    try { await onName(p.id, v || null); toast(v ? `Renamed ${v}` : `${p.name} is back in Cycles`); setEditing(false) } catch (err) { toast(err.message) }
+  }
+  const legColor = p.legs === 'L1' ? C.l1 : p.legs === 'L2' ? C.l2 : C.accent
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: 16, display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'flex-start' }}>
+        <span style={{ display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 }}>
+          <span style={{ fontWeight: 600, fontSize: 16, color: C.bright }}>{p.name}</span>
+          <span style={{ fontFamily: MONO, fontSize: 9, letterSpacing: 1.5, textTransform: 'uppercase', color: C.accent, border: `1px solid ${alpha(C.accent, '50')}`, borderRadius: 10, padding: '1px 6px' }}>cycle</span>
+        </span>
+        <button type="button" onClick={() => setEditing(v => !v)} aria-label={`Rename ${p.name}`} style={{
+          cursor: 'pointer', fontFamily: MONO, fontSize: 10, padding: '3px 8px', borderRadius: 12, color: C.muted, background: 'transparent', border: `1px solid ${C.line2}` }}>rename</button>
+      </div>
+      <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+        <span style={{ color: legColor }}>{p.legs === 'both' ? '240 V' : p.legs}</span> · about {dur(p.median_duration_s ?? p.duration_s)} · ~{fmtInt(p.energy_wh)} Wh a run
+        <br />{p.cycles_today} today · {p.cycles_window} in 48 h{last ? ` · last ${clock(last.start_ts)}–${clock(last.end_ts)}` : ''}
+      </div>
+      {editing && (
+        <form onSubmit={save} style={{ display: 'flex', gap: 6 }}>
+          <input autoFocus value={draft} onChange={e => setDraft(e.target.value)} maxLength={60} aria-label="New name (empty moves it back to Cycles)"
+            style={{ flex: 1, minWidth: 0, height: 32, background: C.field, border: `1px solid ${C.line2}`, borderRadius: 8, color: C.text, fontSize: 13, padding: '0 10px' }} />
+          <button type="submit" style={{ height: 32, padding: '0 12px', borderRadius: 8, cursor: 'pointer', fontFamily: MONO, fontSize: 11, color: C.accent, background: alpha(C.accent, '14'), border: `1px solid ${alpha(C.accent, '50')}` }}>Save</button>
+        </form>
+      )}
     </div>
   )
 }
