@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/api'
+import { newerHunt } from '../ui/hunt'
 
 // The live feed, shared by every view: the latest realtime update, a rolling
 // per-leg series for charts, and recent step events.
@@ -55,7 +56,7 @@ export function useLive() {
       es.addEventListener('snapshot', e => {
         const snap = JSON.parse(e.data)
         if (snap.latest) setLatest(snap.latest)
-        if (snap.hunt) setHunt(snap.hunt)
+        if (snap.hunt) setHunt(h => newerHunt(h, snap.hunt))
         // arm the stale watchdog from the snapshot too: if no update follows, "Live" must not stick
         if (snap.healthy) lastAt.current = Date.now() - (snap.last_message_age_seconds ?? 0) * 1000
         setStatus({ state: 'live', healthy: snap.healthy, monitorOnline: snap.monitor_online })
@@ -73,7 +74,7 @@ export function useLive() {
           }
           setStatus(s => (s.state === 'live' && s.healthy ? s : { ...s, state: 'live', healthy: true }))
         } else if (ev.type === 'hunt') {
-          setHunt(ev.hunt)   // one ordered stream: the newest event is the newest state
+          setHunt(h => newerHunt(h, ev.hunt))
         } else if (ev.type === 'hello') {
           setStatus(s => ({ ...s, monitorOnline: ev.payload?.online }))
         }
