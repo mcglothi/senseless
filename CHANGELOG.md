@@ -2,19 +2,26 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
-## Unreleased
+## 0.10.0 (2026-10-16)
 
 ### Added
-- Backend billing import API for CMP PDFs and Avangrid hourly meter CSVs. Only numeric/date fields are
-  retained; personal identifiers and original documents are discarded. Overlapping imports update
-  existing hours and bills.
-- Billing insights: Sense/meter accuracy, 12-month tariff comparisons, temperature bins, and checks
-  using each imported bill's own rates and split delivery segments.
+- **Import your utility data** on the Bill page: drop bill PDFs and usage exports (several at once). Recognised
+  by content: Green Button XML, Green Button CSV, Smart Meter Texas CSV, Avangrid/CMP hourly CSV, and CMP bill
+  PDFs. Any other usage CSV can be taught once with a column mapping (matched later by a fingerprint of its
+  header, so no column labels are stored). Names, addresses, account/ESIID/meter numbers are dropped on import.
+  (Smart Meter Texas and Green Button CSV follow the published formats and await a real export to verify.)
+- **Multi-utility pricing**: tariffs are data ("tariff packs"), and one engine prices flat, tiered and
+  time-of-use rates, monthly or daily fixed charges with included kWh, usage credits (Texas-style), minimum
+  bills and sales tax with an exempt amount. Pick utility, delivery plan and supply on the Bill page; add another
+  utility's pack via `/api/billing/tariffs` (see notes/energy-providers.md). Central Maine Power ships built in.
+- **Insights from your meter and bills**: the last 12 months priced on every plan of your utility (each month
+  with its real hours, so time-of-use reflects winter evenings), usage vs outdoor temperature, your bill
+  history checked against the model from each bill's own rates, and Sense compared with the utility meter.
 
 ### Changed
-- Cycle plan comparisons use 12 complete calendar months of meter data when available. Projections
-  adjust for last year's seasonal usage when its matching window is complete. Calibration uses only
-  bills with matching current fixed and delivery rates.
+- With a year of meter data, plan comparisons use it instead of the last 7 days (a quiet week had made
+  time-of-use look cheaper than it is), and the cycle projection follows last year's season.
+- The Electric Technology rate is verified against CMP's tariff sheet (page 48.00) and shows its January 2027 end.
 
 ## 0.9.0 (2026-10-16)
 
