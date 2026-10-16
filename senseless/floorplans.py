@@ -242,6 +242,7 @@ class Floorplans:
         row.update(body)
         self._validate_building(row)
         with self._lock, self._conn() as db:
+            self._limit(db, "buildings", 50)
             fields = ('name', 'icon', 'ord', 'x', 'y', 'w', 'h')
             cur = db.execute(f"INSERT INTO buildings ({','.join(fields)}, created) VALUES ({','.join('?' for _ in fields)}, ?)",
                              [row[k] for k in fields] + [time.time()])
@@ -301,7 +302,7 @@ class Floorplans:
         self._fields(body, {"name", "building_id", "level"})
         name = self._text(body.get("name"), "name")
         with self._lock, self._conn() as db:
-            self._limit(db, "floors", 20)
+            self._limit(db, "floors", 60)          # property-wide: several buildings, a few floors each
             building = body.get('building_id')
             if 'building_id' not in body:
                 first = db.execute('SELECT id FROM buildings ORDER BY ord, id LIMIT 1').fetchone()
@@ -323,7 +324,10 @@ class Floorplans:
     def _next_level(db, building):
         used = {r[0] for r in db.execute('SELECT level FROM floors WHERE building_id=?', (building,))}
         # Ground upwards first; use basement levels if all above-ground levels are occupied.
-        return next(level for level in (*range(21), *range(-1, -6, -1)) if level not in used)
+        free = next((level for level in (*range(21), *range(-1, -6, -1)) if level not in used), None)
+        if free is None:
+            raise FloorplanError('this building has a floor on every level (-5 to 20)')
+        return free
 
     @staticmethod
     def _level(db, building, value, ident=None):

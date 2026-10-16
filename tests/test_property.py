@@ -377,3 +377,16 @@ def test_property_routes_without_network(fp, tmp_path):
         assert decoded(await request('GET', '/api/floors')) == []
         assert (await request('DELETE', base)).status == 404
     asyncio.run(run())
+
+
+def test_building_and_floor_limits(tmp_path):
+    import pytest
+    from senseless.floorplans import FloorplanError, Floorplans
+    fp = Floorplans(tmp_path / "settings.db", tmp_path)
+    ids = [fp.add_building({"name": f"B{i}", "icon": "shed"})["id"] for i in range(50)]
+    with pytest.raises(FloorplanError):
+        fp.add_building({"name": "one too many", "icon": "shed"})
+    for i in range(60):                       # 60 floors across the property, 3 per building
+        fp.add_floor({"name": f"F{i}", "building_id": ids[i // 3]})
+    with pytest.raises(FloorplanError):
+        fp.add_floor({"name": "too many", "building_id": ids[-1]})
