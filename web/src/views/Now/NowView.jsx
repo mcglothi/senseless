@@ -261,7 +261,7 @@ function AlwaysOn({ latest, today }) {
   const share = ours ? legShare(base.l1_w, base.l2_w) : null
   return (
     <Card>
-      <Kicker right={<span style={{ fontFamily: MONO, fontSize: 10, color: C.dim }}>{ours ? 'measured · lowest 5% of 24 h' : "Sense's estimate"}</span>}>Always on</Kicker>
+      <Kicker right={<span style={{ fontFamily: MONO, fontSize: 10, color: C.dim }}>{ours ? 'measured · lowest 5% of 24 h' : senseAo != null ? "Sense's estimate" : 'not enough data yet'}</span>}>Always on</Kicker>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 40, fontWeight: 700, color: C.bright }}>{fmtInt(w)}</span>
         <span style={{ color: C.muted, fontSize: 14 }}>W baseline{perDay != null ? ` · ${fmtMoney(perDay)}/day · $${fmtInt(perDay * 365)}/yr` : ''}</span>

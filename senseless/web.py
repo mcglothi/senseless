@@ -190,8 +190,14 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         cost = (st.latest or {}).get("defaultCost")
         return web.json_response(await asyncio.to_thread(summary.today, db_path, cost))
 
+    baseline_cache = {"at": 0.0, "body": None}
+
     async def baseline_get(_):
-        return web.json_response(await asyncio.to_thread(summary.baseline, db_path))
+        # ~170k readings sorted per call: compute at most every 5 min, whoever asks
+        if time.time() - baseline_cache["at"] > 300 or baseline_cache["body"] is None:
+            baseline_cache["body"] = await asyncio.to_thread(summary.baseline, db_path)
+            baseline_cache["at"] = time.time()
+        return web.json_response(baseline_cache["body"])
 
     async def series(req):
         start, end = _window(req, 30, 7 * 24 * 60)
