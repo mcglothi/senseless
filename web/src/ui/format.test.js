@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { find240V, fmtPower, fmtSigned, legShare, repeatingSteps } from './format'
+import { find240V, fmtClock, fmtPower, fmtSigned, legShare, repeatingSteps } from './format'
 import { foldReading } from '../hooks/useLive'
 import { tokensFor } from './themes'
 
@@ -10,6 +10,11 @@ describe('format', () => {
     expect(fmtPower(null)).toBe('—')
     expect(fmtSigned(-1907)).toBe('−1,907 W')
     expect(fmtSigned(299.4)).toBe('+299 W')
+  })
+  it('formats midnight as 00, never 24', () => {
+    const midnight = new Date(2026, 9, 16, 0, 5, 7).getTime() / 1000
+    expect(fmtClock(midnight)).toBe('00:05:07')
+    expect(fmtClock(midnight, { seconds: false })).toBe('00:05')
   })
   it('splits legs into whole percents', () => {
     expect(legShare(89, 1033)).toEqual([8, 92])
