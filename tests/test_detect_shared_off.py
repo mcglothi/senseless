@@ -104,7 +104,7 @@ def test_smallest_error_breaks_equal_start_gap_then_most_recent_wins():
 @pytest.mark.parametrize("fillers,included", [(SHARED_OFF_CAP - 2, True), (SHARED_OFF_CAP - 1, False)])
 def test_cap_counts_only_open_runs_on_the_same_legs(fillers, included):
     steps = [step(0, 700), step(10, 300)]
-    steps += [step(20 + i, 40) for i in range(fillers)]
+    steps += [step(20 + i, 150) for i in range(fillers)]     # fillers big enough to count toward the cap
     steps += [step(40, 600, "L1"), step(50, -600, "L1"), step(60, -1000)]
     runs = pair_runs(steps, 61)
     assert (runs[0].end_ts == runs[1].end_ts == 60) is included
@@ -133,8 +133,9 @@ def test_pair_never_crosses_leg_categories_or_generations():
     assert all(r.end_ts is None for r in detect.detect_runs(ds, 101))
 
 
-def test_absolute_tolerance_and_disabling(monkeypatch):
-    steps = [step(0, 30), step(10, 40), step(100, -90)]
+def test_shared_offs_can_be_disabled(monkeypatch):
+    # (each shared load is >= SHARED_MIN_W, so 15% of their sum always exceeds the 20 W absolute tolerance)
+    steps = [step(0, 110), step(10, 120), step(100, -230)]
     assert all(r.closed_by == "shared-off" for r in pair_runs(steps, 101))
     monkeypatch.setattr(detect, "SHARED_OFF_CAP", 0)
     assert all(r.end_ts is None for r in pair_runs(steps, 101))
@@ -148,3 +149,17 @@ def test_rejected_duration_outlier_clears_shared_off_provenance():
     detect.resolve_closed_runs(runs, 2100, set())
     assert runs[-1].status == "unresolved" and runs[-1].closed_by is None
     assert all(r.closed_by == "shared-off" for r in runs[:-1])
+
+
+def test_small_fragments_never_share_an_off():
+    """A washer's 60 W and 40 W agitation fragments must not be closed together by an unrelated -100 W off."""
+    runs = pair_runs([step(0, 60), step(20, 40), step(300, -100)], 301)
+    assert all(r.status != "closed" or r.closed_by != "shared-off" for r in runs)
+
+
+def test_small_fragments_do_not_use_up_the_candidate_cap():
+    """Many recent small runs must not push a real timer pair out of the candidate window."""
+    steps = [step(0, 900), step(55, 280)] + [step(100 + i * 10, 50 + i) for i in range(SHARED_OFF_CAP + 5)]
+    runs = pair_runs(steps + [step(3600, -1054)], 3601)
+    shared = [r for r in runs if r.closed_by == "shared-off"]
+    assert sorted(round(r.w) for r in shared) == [280, 900]
