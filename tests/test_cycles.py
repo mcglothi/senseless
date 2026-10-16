@@ -117,6 +117,109 @@ def test_clean_switching_appliance_is_not_a_cycle(tmp_path):
     assert found == [] and all(r.cycle is None for r in runs)
 
 
+def test_clean_closures_cannot_bridge_separate_programs(tmp_path):
+    ds, _ = program()
+    ds = [d for d in ds if 600 <= d["ts"] <= 1200 or 1800 <= d["ts"] <= 2400]
+    ds += [delta(605 + i * 100 + offset, w)
+           for i in range(18) for offset, w in ((0, 1500), (40, -1500))]
+    rs = [dict(generation=0, frame=t * 60, ts=t, l2_w=0,
+               l1_w=100 + 600 * (600 <= t <= 1200 or 1800 <= t <= 2400)
+               + 1500 * (605 <= t < 2345 and (t - 605) % 100 < 40))
+          for t in range(420, 2501)]
+    found, runs, _ = run_pipeline(tmp_path, ds, rs)
+    clean = [r for r in runs if r.w == 1500]
+    assert len(clean) == 18 and all(r.status == "closed" for r in clean)
+    assert [(c.start_ts, c.end_ts) for c in found] == [(600, 1200), (1800, 2400)]
+
+
+@pytest.mark.parametrize("kind,w", [("clean", 1500), ("named", 1100), ("small", 70), ("chatter", 130)])
+def test_membership_preserves_independent_and_excluded_loads(tmp_path, kind, w):
+    ds, rs = program()
+    # All occur inside the program: independent clean appliance, named missed
+    # offs, sub-threshold steps, and a frequent background relay with missed offs.
+    if kind == "chatter":
+        ds += [delta(614 + i * 10, w) for i in range(120)]
+        ds += [delta(619 + i * 10, -w) for i in range(50)]
+    else:
+        ds += [delta(605 + i * 100, w) for i in range(24)]
+    if kind == "clean":
+        ds += [delta(645 + i * 100, -w) for i in range(24)]
+        rs = [dict(r, l1_w=r["l1_w"] + w *
+                   (605 <= r["ts"] < 2945 and (r["ts"] - 605) % 100 < 40)) for r in rs]
+    detector = make_detector(tmp_path, ds, rs, 3100)
+    if kind == "named":
+        named = next(p for p in detector.patterns.all() if p["center_w"] == w)
+        detector.patterns.name(named["id"], "Known appliance")
+        detector.recompute(3100)
+    c, = detector.cycles
+    independent = [r for r in detector.runs if r.w == w]
+    assert len(independent) == (120 if kind == "chatter" else 24)
+    assert all(r.cycle is None for r in independent)
+    assert all(not p["part_of_cycles"] and p["cycle_runs"] == 0
+               for p in detector.loads(0) if p["center_w"] == w)
+    assert set(c.member_run_keys) == {cycles.run_key(r) for r in detector.runs if r.cycle == c.id}
+
+
+@pytest.mark.parametrize("saved", ["name", "ignore"])
+def test_growing_cycle_keeps_saved_assignment_across_restart(tmp_path, saved):
+    ds, rs = program()
+    detector = make_detector(tmp_path, [d for d in ds if d["ts"] <= 900],
+                             [r for r in rs if r["ts"] <= 900], 900)
+    early, = detector.cycles
+    pid = early.pattern
+    if saved == "name":
+        detector.cycle_patterns.name(pid, "Washer")
+    else:
+        detector.cycle_patterns.ignore(pid)
+    with sqlite3.connect(detector.deltas_db) as conn:
+        conn.executemany("INSERT INTO deltas (generation,start_frame,frame,ts,channel,w) "
+                         "VALUES (:generation,:start_frame,:start_frame,:ts,:channel,:w)",
+                         [d for d in ds if d["ts"] > 900])
+        conn.executemany("INSERT INTO readings (generation,frame,ts,l1_w,l2_w) "
+                         "VALUES (:generation,:frame,:ts,:l1_w,:l2_w)",
+                         [r for r in rs if r["ts"] > 900])
+    for now in (3060, 3300):  # growing, then completed after the gap timeout
+        detector = Detector(detector.deltas_db, detector.cycle_patterns.db_path)
+        detector.recompute(now)
+        grown, = detector.cycles
+        assert grown.id == early.id and grown.duration_s == 2400
+        assert grown.pattern == pid
+        p, = detector.cycle_loads(0)
+        assert p["name"] == ("Washer" if saved == "name" else None)
+        assert p["ignored"] == (saved == "ignore")
+        assert p["duration_s"] == 2400 and p["energy_wh"] == pytest.approx(grown.energy_wh)
+
+
+def test_expired_cycle_evidence_does_not_change_standalone_runs(tmp_path, monkeypatch):
+    from senseless.detect import MAX_RUN_S, resolve_closed_runs
+
+    ds, rs = program()
+    ds += [delta(100, 1750)]  # missed off, outside the cycle
+    ds += [delta(30000, 1500), delta(30040, -1500), delta(30100, 1750)]
+    now = 30200
+    monkeypatch.setattr("senseless.detect.time.time", lambda: now)
+    detector = make_detector(tmp_path, ds, rs, now)
+    expected = detect_runs(ds, now, rs)
+    legacy = Detector(detector.deltas_db, tmp_path / "legacy-settings.db")
+    patterns = legacy.patterns
+    patterns.assign(expected)
+    resolve_closed_runs(expected, now, set())
+    resolve_open_runs(expected, now)
+    assert len(detector.runs) == len(expected) == 2
+    assert all(r.end_frame is not None or now - r.start_ts <= MAX_RUN_S for r in detector.runs)
+    assert [r.as_dict(now) for r in detector.runs] == [r.as_dict(now) for r in expected]
+    assert detector.runs_between(0, 30000) == []
+    assert [(p["center_w"], p["n"]) for p in detector.patterns.all()] == [
+        (p["center_w"], p["n"]) for p in patterns.all()]
+    assert sum(p["runs_window"] for p in detector.loads(0)) == 2
+    assert all(not p["part_of_cycles"] and p["cycle_runs"] == 0 for p in detector.loads(0))
+    legacy.runs = expected
+    assert detector.loads(0) == legacy.loads(0)
+    # The old program is still detected using evidence expired from run APIs.
+    c, = detector.cycles
+    assert (c.start_ts, c.end_ts) == (600, 3000)
+
+
 def test_named_run_patterns_are_excluded(tmp_path):
     ds, rs = program()
     _, runs, patterns = run_pipeline(tmp_path, ds, rs)
@@ -192,11 +295,11 @@ def test_cycle_pattern_matching_limits_nearest_and_pruning(tmp_path):
     c, = run_pipeline(tmp_path, ds, rs)[0]
     cp = cycles.CyclePatterns(tmp_path / "settings.db")
     other_leg = replace(c, legs="L2")
-    far = replace(c, energy_wh=c.energy_wh * 1.5)
-    cp.assign([c, other_leg, far], 3100)
+    far = replace(c, start_frame=c.start_frame + 600000, energy_wh=c.energy_wh * 1.5)
+    cp.assign([c, other_leg, far], 4000)
     assert len({c.pattern, other_leg.pattern, far.pattern}) == 3
-    nearby = replace(c, energy_wh=c.energy_wh * 1.4)
-    cp.assign([nearby], 3200)
+    nearby = replace(c, start_frame=c.start_frame + 1200000, energy_wh=c.energy_wh * 1.4)
+    cp.assign([nearby], 4100)
     assert nearby.pattern == far.pattern  # within both energy gates; nearest wins
     cp.name(c.pattern, "Washer")
     cp.ignore(other_leg.pattern)
@@ -207,6 +310,34 @@ def test_cycle_pattern_matching_limits_nearest_and_pruning(tmp_path):
         cp.name(99999, "Missing")
     with pytest.raises(KeyError):
         cp.ignore(99999)
+
+
+def test_growing_cycles_cluster_only_after_completion(tmp_path):
+    cp = cycles.CyclePatterns(tmp_path / "settings.db")
+    short = cycles.Cycle(0, 36000, 600, 900, "L1", 16, 3.2, 450, 900, 50, 700, False)
+    cp.assign([short], 1200)
+    cp.name(short.pattern, "Short program")
+    growing = replace(short, start_frame=216000, start_ts=3600, end_ts=3900)
+    cp.assign([short, growing], 3900)
+    assert growing.pattern != short.pattern
+    provisional_id = growing.pattern
+    grown = replace(growing, end_ts=6000, energy_wh=400)
+    cp.assign([short, grown], 6100)
+    assert grown.pattern == provisional_id
+    assert next(p for p in cp.all() if p["id"] == short.pattern)["duration_s"] == 300
+    cp.name(grown.pattern, "Washer")
+    cp.assign([short, grown], 6300)
+    p = next(p for p in cp.all() if p["id"] == grown.pattern)
+    assert p["duration_s"] == 2400 and p["energy_wh"] == 400 and not p["provisional"]
+    # Another wash seen while growing stays independent, then joins the final
+    # named centre when complete. Its prefix must not alter the named centre.
+    next_wash = replace(growing, start_frame=432000, start_ts=7200, end_ts=7500)
+    cp.assign([grown, next_wash], 7500)
+    assert next_wash.pattern != grown.pattern
+    final_wash = replace(next_wash, end_ts=9600, energy_wh=400)
+    cp.assign([grown, final_wash], 9900)
+    assert final_wash.pattern == grown.pattern
+    assert next(p for p in cp.all() if p["id"] == grown.pattern)["n"] == 2
 
 
 def test_sql_cycle_means_match_raw_bins(tmp_path):
@@ -242,10 +373,10 @@ def test_fragment_flag_requires_seventy_percent_of_window_runs(tmp_path):
 def test_cycle_pattern_feature_gates(tmp_path, feature, scale):
     c = cycles.Cycle(0, 36000, 600, 3000, "L1", 121, 3.025, 450, 900, 400, 700, False)
     cp = cycles.CyclePatterns(tmp_path / "settings.db")
-    cp.assign([c], 3100)
+    cp.assign([c], 4000)
     changes = {feature: getattr(c, feature) * scale} if feature != "duration_s" else {"end_ts": c.start_ts + c.duration_s * scale}
-    other = replace(c, **changes)
-    cp.assign([c, other], 3200)
+    other = replace(c, start_frame=c.start_frame + 600000, **changes)
+    cp.assign([c, other], 5000)
     assert other.pattern != c.pattern
 
 

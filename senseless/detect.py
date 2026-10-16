@@ -361,8 +361,8 @@ class Patterns:
     def _snapshot(self, db) -> list[dict]:
         return [dict(r) for r in db.execute("SELECT * FROM patterns")]
 
-    def assign(self, runs: list[Run]) -> None:
-        """Give every run a pattern id, creating patterns as needed. Named patterns' centres stay put."""
+    def assign(self, runs: list[Run], *, persist: bool = True) -> None:
+        """Assign shapes; cycle-only evidence uses temporary IDs without changing run patterns."""
         with self._write, self._conn() as db:
             pats = self._snapshot(db)
             for r in runs:
@@ -375,11 +375,17 @@ class Patterns:
                     if err <= CLUSTER_TOL and (best_err is None or err < best_err):
                         best, best_err = p, err
                 if best is None:
-                    cur = db.execute("INSERT INTO patterns (legs, stages, center_w, n, created) VALUES (?,?,?,?,?)",
-                                     (r.legs, stages, r.w, 0, time.time()))
-                    best = {"id": cur.lastrowid, "legs": r.legs, "stages": stages, "center_w": r.w, "n": 0, "name": None}
+                    if persist:
+                        cur = db.execute("INSERT INTO patterns (legs, stages, center_w, n, created) VALUES (?,?,?,?,?)",
+                                         (r.legs, stages, r.w, 0, time.time()))
+                        pid = cur.lastrowid
+                    else:
+                        pid = -len(pats) - 1
+                    best = {"id": pid, "legs": r.legs, "stages": stages, "center_w": r.w, "n": 0, "name": None}
                     pats.append(best)
                 r.pattern = best["id"]
+            if not persist:
+                return
             # refresh centres (unnamed only) and counts from this window's runs
             by_id: dict[int, list[Run]] = {}
             for r in runs:
@@ -581,18 +587,35 @@ class Detector:
         self.computed_at = 0.0
 
     def recompute(self, now_ts: float | None = None) -> None:
-        from .cycles import BASELINE_S, detect_cycles
+        from .cycles import BASELINE_S, detect_cycles, run_key
 
         now_ts = now_ts if now_ts is not None else time.time()
         since = now_ts - WINDOW_S
         deltas = load_deltas(self.deltas_db, since)
         readings = load_readings(self.deltas_db, since - BASELINE_S)
-        # Keep missed offs for the full cycle window, including yesterday's wash.
-        runs = detect_runs(deltas, now_ts, readings, keep_expired=True)
+        runs = detect_runs(deltas, now_ts, readings)
         self.patterns.assign(runs)
-        resolve_closed_runs(runs, now_ts, {p["id"] for p in self.patterns.all() if p["name"]})
+        patterns = self.patterns.all()
+        named = {p["id"] for p in patterns if p["name"]}
+        resolve_closed_runs(runs, now_ts, named)
         resolve_open_runs(runs, now_ts)
-        cycles = detect_cycles(deltas, runs, self.patterns.all(), readings, now_ts)
+        # Retain yesterday's missed offs only as cycle evidence. Temporary pattern
+        # assignment must not create/count/prune patterns or change public run status.
+        cycle_runs = detect_runs(deltas, now_ts, readings, keep_expired=True)
+        self.patterns.assign(cycle_runs, persist=False)
+        resolve_closed_runs(cycle_runs, now_ts, named)
+        resolve_open_runs(cycle_runs, now_ts)
+        temporary = {}
+        for r in cycle_runs:
+            if r.pattern < 0:
+                temporary.setdefault(r.pattern, []).append(r)
+        cycle_shapes = {pid: dict(id=pid, legs=rs[0].legs, name=None,
+                                 center_w=sorted(r.w for r in rs)[len(rs) // 2])
+                        for pid, rs in temporary.items()}
+        cycles = detect_cycles(deltas, cycle_runs, patterns + list(cycle_shapes.values()), readings, now_ts)
+        membership = {run_key(r): r.cycle for r in cycle_runs}
+        for r in runs:
+            r.cycle = membership.get(run_key(r))
         self.cycle_patterns.assign(cycles, now_ts)
         try:
             self.hints = sense_hints(runs, load_sense_ons(self.deltas_db, now_ts - WINDOW_S))

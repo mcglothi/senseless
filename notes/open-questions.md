@@ -25,6 +25,7 @@ Things we don't know yet, roughly in priority order. If you figure one out, move
 - [x] Group runs into patterns by legs, stage count and size (12%); patterns + names persist in settings.db.
 - [x] Labeling loop: Loads inbox with name ideas; named patterns tag future steps.
 - [x] Backend program cycles and persistent naming: replay groups the 2026-10-16 washer into one L1 envelope; fragment flags and API available (see cycles.md).
+- [x] Preserve saved cycle assignments during growth; exclude reliable clean gap bridges and unrelated overlap from fragment suppression; isolate expired cycle evidence from run APIs/statistics (2026-10-16, findings.md).
 - [ ] Show cycle patterns/events in the UI and hide `part_of_cycles` fragments in the Loads inbox.
 - [ ] Validate cycle envelopes on more washes and actual dishwasher captures; distinguish overlapping programs and refine physical start/end estimates.
 - [ ] Decompose "Always On" and "Other" by leg.

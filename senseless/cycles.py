@@ -23,7 +23,9 @@ MIN_STEPS = 12
 MIN_DURATION_S = 300
 MAX_DURATION_S = 4 * 3600
 MIN_STEP_RATE = .15
-MIN_UNPAIRED_SHARE = .5  # clean on/off appliances are runs, not programs
+MIN_UNPAIRED_SHARE = .5
+MIN_RELIABLE_CLOSURES = 3
+RELIABLE_CLOSED_SHARE = .8
 BASELINE_S = 120
 MIN_POWER_W = 100
 MIN_COVERAGE = .8
@@ -118,6 +120,15 @@ def detect_cycles(deltas, runs, patterns, readings, now_ts):
     """Rebuild envelopes and membership after run assignment/status resolution."""
     chatter = chatter_patterns(runs, patterns, now_ts)
     excluded = chatter | {p["id"] for p in patterns if p["name"]}
+    grouped = defaultdict(list)
+    for r in runs:
+        grouped[r.pattern].append(r)
+    # A repeated clean appliance must not bridge programs. Individual pairings
+    # in mixed, mostly-unpaired program shapes are weaker evidence: the real wash
+    # has such pairings across its pause, and dropping all of them splits it.
+    reliable = {pid for pid, rs in grouped.items()
+                if sum(r.status == "closed" for r in rs) >= max(MIN_RELIABLE_CLOSURES,
+                                                               RELIABLE_CLOSED_SHARE * len(rs))}
     lookup = {run_key(r): r for r in runs}
     by_gen, power_by_gen = defaultdict(list), defaultdict(list)
     for r in runs:
@@ -133,7 +144,8 @@ def detect_cycles(deltas, runs, patterns, readings, now_ts):
         candidates = defaultdict(list)
         for s in steps:
             run = lookup.get((gen, s.frame, s.legs))
-            if s.w >= MIN_STEP_W and run is not None and run.pattern not in excluded:
+            if s.w >= MIN_STEP_W and run is not None and run.pattern not in excluded and \
+                    not (run.status == "closed" and run.pattern in reliable):
                 candidates[s.legs].append((s, run))
         for legs, ss in candidates.items():
             bursts = []
@@ -158,16 +170,17 @@ def detect_cycles(deltas, runs, patterns, readings, now_ts):
                               median(sizes), sizes[math.ceil(.9 * len(sizes)) - 1], *measured,
                               any(s.legs == legs and first.frame <= s.frame <= last.frame and s.w >= 1000
                                   for s in steps))
-                for r in runs:
-                    if r.generation == gen and r.legs == legs and first.ts <= r.start_ts <= last.ts:
-                        r.cycle = cycle.id
-                        cycle.member_run_keys.append(run_key(r))
+                for _, r in burst:
+                    if r.status == "closed":
+                        continue
+                    r.cycle = cycle.id
+                    cycle.member_run_keys.append(run_key(r))
                 cycles.append(cycle)
     return sorted(cycles, key=lambda c: (c.start_ts, c.id))
 
 
 class CyclePatterns:
-    """Persistent names and frozen named centres in settings.db, never the collector DB."""
+    """Persistent cycle identity and names; named centres freeze after completion."""
 
     def __init__(self, db_path):
         self.db_path = db_path
@@ -178,6 +191,11 @@ class CyclePatterns:
                 duration_s REAL NOT NULL, energy_wh REAL NOT NULL, step_rate REAL NOT NULL,
                 median_step_w REAL NOT NULL, n INTEGER NOT NULL DEFAULT 0, name TEXT,
                 ignored INTEGER NOT NULL DEFAULT 0, created REAL NOT NULL, named_at REAL, last_seen REAL)""")
+            cols = {r[1] for r in db.execute("PRAGMA table_info(cycle_patterns)")}
+            if "provisional" not in cols:
+                db.execute("ALTER TABLE cycle_patterns ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0")
+            db.execute("""CREATE TABLE IF NOT EXISTS cycle_assignments (
+                cycle_id TEXT PRIMARY KEY, pattern_id INTEGER NOT NULL, last_seen REAL NOT NULL)""")
 
     @contextmanager
     def _conn(self):
@@ -197,37 +215,65 @@ class CyclePatterns:
         now_ts = time.time() if now_ts is None else now_ts
         with self._write, self._conn() as db:
             pats = [dict(r) for r in db.execute("SELECT * FROM cycle_patterns ORDER BY id")]
+            by_id = {p["id"]: p for p in pats}
+            assigned = {r["cycle_id"]: r["pattern_id"] for r in db.execute("SELECT * FROM cycle_assignments")}
             grouped = defaultdict(list)
-            for c in cycles:
+            # A growing envelope has its own provisional centre. It cannot match
+            # or move a completed program's centre just because it is briefly small.
+            for c in sorted(cycles, key=lambda c: (now_ts - c.end_ts <= GAP_S, c.start_ts, c.id)):
+                complete = now_ts - c.end_ts > GAP_S
+                previous = by_id.get(assigned.get(c.id))
+                best = previous
+                # Unlabelled provisional cycles may join a completed cluster once
+                # they finish. Saved names/ignores always stay attached to the ID.
+                if best and complete and best["provisional"] and not (best["name"] or best["ignored"]):
+                    best = None
                 matches = []
-                for p in pats:
-                    if p["legs"] != c.legs:
+                for p in pats if best is None and complete else []:
+                    if p["provisional"] or p["legs"] != c.legs:
                         continue
                     errs = [abs(getattr(c, k) - p[k]) / p[k] / tol for k, tol in FEATURES.items()]
                     if max(errs) <= 1:
                         matches.append((sum(e * e for e in errs), p["id"], p))
-                if matches:
+                if best is None and matches:
                     best = min(matches, key=lambda item: item[:2])[2]
-                else:
+                if best is None:
+                    # Finish the existing anonymous provisional pattern if there
+                    # is no completed match; avoid manufacturing a replacement ID.
+                    best = previous
+                if best is None:
                     values = [getattr(c, k) for k in CENTRES]
                     cur = db.execute("""INSERT INTO cycle_patterns
-                        (legs,duration_s,energy_wh,median_step_w,step_rate,created) VALUES (?,?,?,?,?,?)""",
-                                     (c.legs, *values, now_ts))
-                    best = dict(id=cur.lastrowid, legs=c.legs, name=None, **dict(zip(CENTRES, values)))
+                        (legs,duration_s,energy_wh,median_step_w,step_rate,created,provisional) VALUES (?,?,?,?,?,?,?)""",
+                                     (c.legs, *values, now_ts, int(not complete)))
+                    best = dict(id=cur.lastrowid, legs=c.legs, name=None, ignored=0,
+                                provisional=int(not complete), **dict(zip(CENTRES, values)))
                     pats.append(best)
+                    by_id[best["id"]] = best
                 c.pattern = best["id"]
                 grouped[c.pattern].append(c)
+                db.execute("""INSERT INTO cycle_assignments (cycle_id,pattern_id,last_seen) VALUES (?,?,?)
+                    ON CONFLICT(cycle_id) DO UPDATE SET pattern_id=excluded.pattern_id,last_seen=excluded.last_seen""",
+                           (c.id, c.pattern, now_ts))
+                if complete and best["provisional"]:
+                    # Make the final centre available to later completed cycles
+                    # in this batch. SQL below freezes it only after maturation.
+                    best.update({k: getattr(c, k) for k in CENTRES})
+                    best["provisional"] = 0
             for p in pats:
                 cs = grouped[p["id"]]
                 if not cs:
                     db.execute("UPDATE cycle_patterns SET n=0 WHERE id=?", (p["id"],))
                     continue
-                values = [median(getattr(c, k) for c in cs) for k in CENTRES]
-                updates = ",".join(f"{k}=CASE WHEN name IS NULL THEN ? ELSE {k} END" for k in CENTRES)
-                db.execute(f"UPDATE cycle_patterns SET {updates}, n=?,last_seen=? WHERE id=?",
-                           (*values, len(cs), max(c.start_ts for c in cs), p["id"]))
+                completed = [c for c in cs if now_ts - c.end_ts > GAP_S]
+                values = [median(getattr(c, k) for c in completed or cs) for k in CENTRES]
+                updates = ",".join(f"{k}=CASE WHEN name IS NULL OR provisional=1 THEN ? ELSE {k} END" for k in CENTRES)
+                db.execute(f"UPDATE cycle_patterns SET {updates}, provisional=?,n=?,last_seen=? WHERE id=?",
+                           (*values, p["provisional"], len(cs), max(c.start_ts for c in cs), p["id"]))
             db.execute("""DELETE FROM cycle_patterns WHERE name IS NULL AND ignored=0 AND n=0
                 AND coalesce(last_seen,created) < ?""", (now_ts - PRUNE_AFTER_S,))
+            db.execute("""DELETE FROM cycle_assignments WHERE last_seen < ?
+                OR pattern_id NOT IN (SELECT id FROM cycle_patterns)""", (now_ts - PRUNE_AFTER_S,))
 
     def name(self, pattern_id, name):
         name = (name or "").strip()[:60] or None

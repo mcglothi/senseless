@@ -133,3 +133,23 @@ From 5 minutes of feed in one house:
 - **Synthetic only:** dishwasher heater stages, other leg configurations and
   multi-day clustering. Removing chatter exclusion admits a deliberately noisy
   relay fixture as a false cycle; with the exclusion it yields none.
+
+## 2026-10-16: Cycle review regressions and replay after isolation fixes
+
+- **Verified by rerunning the same scratch capture through temporary SQLite:**
+  still exactly one L1 envelope, 08:19:38–09:06:00, 219.18 Wh; no dryer,
+  L2/both-leg or chatter cycles. Candidate steps are now 120 and supporting
+  unclosed members 109; thirteen public patterns meet the fragment flag.
+- The six-hour expiry pipeline returns 1,369 public runs, versus 1,465 retained
+  cycle-evidence runs. Public runs and persistent pattern IDs/counts/centres
+  match a separate legacy-pipeline replay exactly, apart from cycle membership.
+  Expanded evidence never creates or updates persistent run patterns.
+- **Synthetic regressions, individually falsified by reverting each fix:** saved
+  names/ignores survive a five-to-forty-minute envelope and detector restarts;
+  clean recurring closures cannot bridge two programs; independent closed,
+  named, small and chatter runs retain inbox eligibility; expired missed offs
+  cannot return through run timelines, pattern counts or load statistics.
+- **Heuristic:** reliable repeated closures mean at least three and 80% closed
+  runs in a pattern. Removing all individual closures splits this wash, whose
+  mixed program patterns include incidental pairings across a pause. Membership
+  nevertheless uses only unclosed supporting candidates. See [cycles.md](cycles.md).
