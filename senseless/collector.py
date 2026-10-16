@@ -23,6 +23,7 @@ from . import auth, web
 from .appearance import Appearance
 from .circuits import Circuits
 from .detect import Detector
+from .history import History
 from .state import LiveState
 from .store import Store
 
@@ -216,7 +217,7 @@ class Collector:
         settings_db = self.store.path.parent / "settings.db"
         self.detector = Detector(self.store.path, settings_db)
         runner = await web.serve(self.state, self.store.path, Appearance(settings_db, self.store.path.parent), self.detector,
-                                 Circuits(settings_db))
+                                 Circuits(settings_db), History(settings_db, lambda: self.sess))
         tasks = [asyncio.create_task(self.connect_loop()), asyncio.create_task(self.watchdog()),
                  asyncio.create_task(self.detect_loop())]
         await self.stopping.wait()

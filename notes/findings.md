@@ -57,3 +57,14 @@ From 5 minutes of feed in one house:
 - Recurring patterns from one evening of deltas, all unlabeled for now: a ~495 W L2 load running ~3 min
   (seen 20:51 and 22:08), a 45 W step on L2 every few seconds (300+ per day), and a ~55 W, ~13 s pulse on L1.
   Steps under ~30 W are frequent enough to be mostly noise floor.
+
+## 2026-10-16: Sense history API
+
+- `GET app/monitors/{id}/history/usage?scale=DAY|WEEK|MONTH|CYCLE|YEAR&start=<ISO>` (from the Android client;
+  `HOUR` is rejected). Returns `consumption.usage_breakdown_kwh` / `cost_breakdown_cents` (24 hours for DAY,
+  one per day for MONTH, 12 for YEAR), totals, and `device_breakdown[]` with each detected device's own
+  per-bucket kWh, cost and percentage.
+- **A `start` at local midnight returns the previous period.** Anchor at local noon of the wanted date.
+- Period starts come back at 05:00Z (the EST offset) even during EDT, so Sense's "day" can be shifted by an
+  hour from a local day.
+- For this house, October so far: 605 kWh, of which "Always On" 49% and "Other" 40%; Sense names ~11%.

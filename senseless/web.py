@@ -12,6 +12,7 @@ from aiohttp import web
 from . import summary
 from .appearance import Appearance, AppearanceError
 from .circuits import CircuitError, Circuits
+from .history import History, HistoryError
 from .state import CLOSE, LiveState
 
 LEGS = ("L1", "L2")
@@ -138,7 +139,7 @@ def _web_dir() -> Path | None:
 
 
 def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None,
-             detector=None, circuits: Circuits | None = None) -> web.Application:
+             detector=None, circuits: Circuits | None = None, history: History | None = None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
@@ -325,6 +326,15 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             raise web.HTTPNotFound(text="no such circuit")
         return web.json_response({"ok": True})
 
+    # ── history (Sense cloud, cached) ───────────────────────────────────────
+    async def history_get(req):
+        if history is None:
+            raise web.HTTPNotFound(text="history not configured")
+        try:
+            return web.json_response(await asyncio.to_thread(history.get, req.query.get("scale", "month"), req.query.get("date", "")))
+        except HistoryError as e:
+            return web.json_response({"error": str(e)}, status=400 if "date" in str(e) or "scale" in str(e) or "future" in str(e) else 502)
+
     web_dir = web_dir or _web_dir()
 
     async def index(_):
@@ -350,6 +360,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.post("/api/loads/{id}/name", load_name), web.post("/api/loads/{id}/ignore", load_ignore),
         web.get("/api/circuits", circuits_get), web.post("/api/circuits", circuits_add),
         web.delete("/api/circuits/{id}", circuits_remove),
+        web.get("/api/history", history_get),
     ])
     if web_dir and (web_dir / "assets").is_dir():
         app.router.add_static("/assets", web_dir / "assets", append_version=False)
@@ -357,9 +368,10 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
 
 
 async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None,
-                circuits: Circuits | None = None) -> web.AppRunner:
+                circuits: Circuits | None = None, history: History | None = None) -> web.AppRunner:
     # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
-    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits), access_log=None, shutdown_timeout=3)
+    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits, history=history),
+                             access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))
     await web.TCPSite(runner, os.environ.get("SENSELESS_HTTP_HOST", "0.0.0.0"), port).start()
