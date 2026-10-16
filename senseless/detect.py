@@ -301,8 +301,14 @@ class Detector:
         now = time.time()
         out = []
         for r in self.runs:
-            stop = r.end_ts if r.end_ts is not None else (now if r.running else r.start_ts)
-            if r.start_ts < end and stop >= start:
+            if r.start_ts >= end:
+                continue
+            if r.status == "unresolved":
+                keep = r.start_ts >= start          # no known end: only its start can fall in the window
+            else:
+                stop = r.end_ts if r.end_ts is not None else now
+                keep = stop > start                 # strict: a run ending exactly at the window start is outside
+            if keep:
                 out.append(r.as_dict(now))
         return out
 

@@ -229,3 +229,14 @@ def test_named_centre_is_frozen_even_if_named_after_the_snapshot(tmp_path):
     p.assign(pair_runs(to_steps([d(0, 0, 110), d(600, 0, -110), d(1200, 0, 110), d(1800, 0, -110)]), now_ts=1e12))
     row = next(x for x in Patterns(tmp_path / "s.db").all() if x["id"] == pid)
     assert row["name"] == "Lamp" and row["center_w"] == 100   # named signature not moved to 110
+
+
+def test_runs_between_is_strict_at_the_window_start(tmp_path):
+    from senseless.detect import Detector, Run
+    det = Detector(tmp_path / "unused.db", tmp_path / "s.db")
+    det.runs = [Run(0, 50.0, "L1", 100.0, [(0, 100.0)], end_frame=3000, end_ts=100.0, off_w=-100, status="closed"),
+                Run(0, 90.0, "L1", 100.0, [(0, 100.0)], end_frame=1200, end_ts=110.0, off_w=-100, status="closed"),
+                Run(0, 80.0, "L2", 300.0, [(0, 300.0)], status="unresolved"),
+                Run(0, 150.0, "L2", 300.0, [(0, 300.0)], status="unresolved")]
+    got = [(r["start_ts"], r["status"]) for r in det.runs_between(100, 200)]
+    assert got == [(90.0, "closed"), (150.0, "unresolved")]

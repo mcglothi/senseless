@@ -27,7 +27,8 @@ function useWindowData(win) {
       api('GET', `/api/deltas?start=${start}&end=${end}`),
       api('GET', `/api/runs?start=${start}&end=${end}`).catch(() => []),
     ]).then(([series, deltas, runs]) => { if (alive) setData({ series, deltas, runs, loading: false }) })
-      .catch(e => { if (alive) { setData(d => ({ ...d, loading: false })); toast(`Couldn't load: ${e.message}`) } })
+      // never leave the previous window's data plotted against the new axes
+      .catch(e => { if (alive) { setData({ series: [], deltas: [], runs: [], loading: false }); toast(`Couldn't load: ${e.message}`) } })
     return () => { alive = false }
   }, [win.end, win.span])
   return data
@@ -58,7 +59,7 @@ function Chart({ win, data, patterns, onZoomTo, selected, onSelect, allRuns }) {
   const names = useMemo(() => new Map(patterns.map(p => [p.id, p])), [patterns])
   const minW = allRuns ? 0 : minRunW(win.span)
   const shown = useMemo(() => data.runs.filter(r => r.w >= minW || names.get(r.pattern)?.name), [data.runs, minW, names])
-  const rows = useMemo(() => packRows(shown, win.end, 5), [shown, win.end])
+  const rows = useMemo(() => packRows(shown, win.end, 5, (8 / W) * win.span), [shown, win.end, W, win.span])
   const nRows = Math.max(1, ...rows.map(r => r.row + 1))
   const H = yRuns + nRows * (LANES.runRow + 6) + 30
   const ticks = ticksFor(win.span, start, win.end)
@@ -93,7 +94,7 @@ function Chart({ win, data, patterns, onZoomTo, selected, onSelect, allRuns }) {
 
   return (
     <div ref={ref} style={{ width: '100%', position: 'relative' }}>
-      <svg width={width} height={H} role="img" aria-label="Timeline of per-leg power, steps and detected runs"
+      <svg width={width} height={H} role="group" aria-label="Timeline of per-leg power, steps and detected runs. Runs are buttons: Tab to them, Enter to inspect."
         onMouseMove={onMove} onMouseLeave={() => { setHover(null); setDrag(null) }}
         onMouseDown={e => { const x = e.clientX - e.currentTarget.getBoundingClientRect().left; if (x >= GUTTER) setDrag({ x1: x, x2: x }) }}
         onMouseUp={onUp} style={{ display: 'block', userSelect: 'none', cursor: drag ? 'col-resize' : 'crosshair' }}>
@@ -130,8 +131,12 @@ function Chart({ win, data, patterns, onZoomTo, selected, onSelect, allRuns }) {
           const label = p?.name ?? `${legsLabel(r.legs)} ${fmtInt(r.w)} W`
           const isSel = selected && selected.start_frame === r.start_frame && selected.legs === r.legs && selected.generation === r.generation
           return (
-            <g key={`${r.generation ?? 0}-${r.start_frame}-${r.legs}`} onClick={e => { e.stopPropagation(); onSelect(r) }} style={{ cursor: 'pointer' }}
-              onMouseDown={e => e.stopPropagation()}>
+            <g key={`${r.generation ?? 0}-${r.start_frame}-${r.legs}`} onClick={e => { e.stopPropagation(); onSelect(r) }} style={{ cursor: 'pointer', outline: 'none' }}
+              onMouseDown={e => e.stopPropagation()} tabIndex={0} role="button"
+              aria-label={`${label}, ${fmtClock(r.start_ts, { seconds: false })}, ${r.status === 'unresolved' ? 'end not seen' : fmtDuration(r.duration_s)}`}
+              aria-pressed={isSel} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(r) } }}
+              onFocus={e => e.currentTarget.querySelector('rect')?.setAttribute('stroke-width', '3')}
+              onBlur={e => e.currentTarget.querySelector('rect')?.setAttribute('stroke-width', isSel ? '2' : '1')}>
               <rect x={x1} y={y} width={w} height={LANES.runRow} rx="5" fill={alpha(c, isSel ? '55' : r.status === 'unresolved' ? '10' : '26')}
                 stroke={c} strokeWidth={isSel ? 2 : 1} strokeDasharray={r.status === 'unresolved' ? '3 3' : undefined} />
               {w > 46 && <text x={x1 + 6} y={y + 15} fontSize="10.5" fontFamily="JetBrains Mono, monospace" fill={C.text}
@@ -235,9 +240,12 @@ function Inspector({ run, patterns, onName, onZoom, onClose }) {
 export function TimelineView({ loads }) {
   const { sp } = useTheme()
   const [win, setWin] = useState(() => ({ end: Math.floor(Date.now() / 1000), span: 10800, live: true }))
-  const [selected, setSelected] = useState(null)
+  const [selectedRaw, setSelected] = useState(null)
   const [allRuns, setAllRuns] = useState(false)
   const data = useWindowData(win)
+  // the inspector shows the latest copy of the selected run, so "on now" / duration stay current
+  const sameRun = (a, b) => a && b && a.start_frame === b.start_frame && a.legs === b.legs && (a.generation ?? 0) === (b.generation ?? 0)
+  const selected = useMemo(() => (selectedRaw && data.runs.find(r => sameRun(r, selectedRaw))) || selectedRaw, [selectedRaw, data.runs])
 
   // live: slide the window to now every 15 s
   useEffect(() => {

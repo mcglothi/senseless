@@ -28,6 +28,20 @@ describe('timeline helpers', () => {
     expect(rowOf(120)).toBe(1)          // fits in row 1 after the 50 W run ended
     expect(rowOf(65)).toBeUndefined()   // no 4th row; smallest dropped
   })
+  it('keeps hour ticks on local multiples across a DST change', () => {
+    const prev = process.env.TZ
+    process.env.TZ = 'America/New_York'
+    try {
+      const start = new Date('2026-11-01T00:00:00-04:00').getTime() / 1000   // DST ends 02:00 that night
+      const labels = ticksFor(86400, start, start + 86400).map(x => x.label)
+      expect(labels.slice(0, 4)).toEqual(['00:00', '03:00', '06:00', '09:00'])
+    } finally { process.env.TZ = prev }
+  })
+  it('gives near-zero-length runs a minimum width when packing', () => {
+    const runs = [{ start_ts: 0, end_ts: null, w: 100 }, { start_ts: 1, end_ts: null, w: 90 }]
+    expect(packRows(runs, 0, 4).map(x => x.row)).toEqual([0, 0])            // overlap ignored at zero width
+    expect(packRows(runs, 0, 4, 60).map(x => x.row)).toEqual([0, 1])        // 60 s min width: separate rows
+  })
   it('filters small runs at wide zooms', () => {
     expect(minRunW(10800)).toBe(100)
     expect(minRunW(120)).toBe(30)
