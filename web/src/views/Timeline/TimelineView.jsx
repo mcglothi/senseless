@@ -128,9 +128,9 @@ function Chart({ win, data, patterns, onZoomTo, selected, onSelect, allRuns }) {
           const x1 = Math.max(GUTTER, X(r.start_ts)), x2 = Math.min(GUTTER + W, X(r.end_ts ?? (r.running ? win.end : r.start_ts)))
           const w = Math.max(4, x2 - x1), y = yRuns + row * (LANES.runRow + 6)
           const label = p?.name ?? `${legsLabel(r.legs)} ${fmtInt(r.w)} W`
-          const isSel = selected && selected.start_frame === r.start_frame && selected.legs === r.legs
+          const isSel = selected && selected.start_frame === r.start_frame && selected.legs === r.legs && selected.generation === r.generation
           return (
-            <g key={`${r.start_frame}-${r.legs}`} onClick={e => { e.stopPropagation(); onSelect(r) }} style={{ cursor: 'pointer' }}
+            <g key={`${r.generation ?? 0}-${r.start_frame}-${r.legs}`} onClick={e => { e.stopPropagation(); onSelect(r) }} style={{ cursor: 'pointer' }}
               onMouseDown={e => e.stopPropagation()}>
               <rect x={x1} y={y} width={w} height={LANES.runRow} rx="5" fill={alpha(c, isSel ? '55' : r.status === 'unresolved' ? '10' : '26')}
                 stroke={c} strokeWidth={isSel ? 2 : 1} strokeDasharray={r.status === 'unresolved' ? '3 3' : undefined} />
