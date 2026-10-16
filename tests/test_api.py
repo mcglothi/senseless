@@ -234,6 +234,9 @@ def test_circuits_api(tmp_path):
             for bad in ({"breaker": "", "l1_w": 0, "l2_w": 0}, {"breaker": "1", "l1_w": "x", "l2_w": 0},
                         {"breaker": "1", "l1_w": 0, "l2_w": 99999}, {"breaker": "x" * 30, "l1_w": 0, "l2_w": 0}):
                 assert (await c.post("/api/circuits", json=bad)).status == 400, bad
+            for junk in ("[]", "null", "5", '"x"'):
+                r = await c.post("/api/circuits", data=junk, headers={"Content-Type": "application/json"})
+                assert r.status == 400, junk
             assert len(await (await c.get("/api/circuits")).json()) == 1
             assert (await c.delete(f"/api/circuits/{row['id']}", headers={"Origin": "http://evil.example"})).status == 403
             assert (await c.delete(f"/api/circuits/{row['id']}")).status == 200

@@ -13,8 +13,9 @@ function useReadings(latest) {
   const [, tick] = useState(0)
   useEffect(() => {
     const [l1, l2] = latest?.channels ?? []
-    if (l1 == null) return
-    const t = latest.t ?? Date.now() / 1000
+    // only server-timestamped live readings: the snapshot has no t, and the phone's clock may differ
+    if (l1 == null || latest.t == null) return
+    const t = latest.t
     buf.current = buf.current.filter(r => r.t >= t - 60).concat({ t, l1, l2 })
     tick(n => n + 1)
   }, [latest])
@@ -54,7 +55,7 @@ export function HuntView({ live }) {
   const { sp } = useTheme()
   const readings = useReadings(live.latest)
   const circuits = useCircuits()
-  const [stage, setStage] = useState('idle')        // idle | watching | flipback
+  const [stage, setStage] = useState('idle')        // idle | settling | watching | flipback
   const [baseline, setBaseline] = useState(null)
   const [breaker, setBreaker] = useState('')
   const [name, setName] = useState('')
@@ -66,11 +67,23 @@ export function HuntView({ live }) {
   const alwaysOn = live.latest?.devices?.find(d => d.name === 'Always On')?.w
   const exp = explained(circuits.list, alwaysOn)
 
+  const healthy = live.status.state === 'live' && live.status.healthy
+  const settleTimer = useRef(null)
+  useEffect(() => () => clearTimeout(settleTimer.current), [])
+  const latestRef = useRef({ readings, now })
+  latestRef.current = { readings, now }
+  // Start / Next: let the panel settle (a breaker just switched back on), then average 3 fresh seconds
   const start = () => {
-    const b = legAverage(readings, 6, now)
-    if (b.n < 3) { toast('Waiting for live readings…'); return }
-    setBaseline({ t: now, l1: b.l1, l2: b.l2 })
-    setStage('watching')
+    if (!healthy) { toast('The live feed is stale; wait for it to reconnect'); return }
+    setStage('settling')
+    clearTimeout(settleTimer.current)
+    settleTimer.current = setTimeout(() => {
+      const { readings: rs, now: n } = latestRef.current
+      const b = legAverage(rs, 3, n)
+      if (b.n < 3) { toast('Waiting for live readings…'); setStage('idle'); return }
+      setBaseline({ t: n, l1: b.l1, l2: b.l2 })
+      setStage('watching')
+    }, 4000)
   }
   const save = async e => {
     e.preventDefault()
@@ -94,10 +107,21 @@ export function HuntView({ live }) {
         <Leg leg={2} w={l2} drop={drop?.l2} active={drop && Math.abs(drop.l2) >= 15} />
       </div>
 
+      {!healthy && stage !== 'idle' && (
+        <div role="alert" style={{ fontFamily: MONO, fontSize: 12, color: C.amber, padding: '10px 12px', borderRadius: 10, border: `1px solid ${alpha(C.amber, '50')}` }}>
+          Live feed stale: readings may be old. Wait for "Live", then re-baseline.
+        </div>
+      )}
+      {stage === 'settling' && (
+        <section aria-live="polite" style={{ background: C.panel, border: `1px dashed ${C.line2}`, borderRadius: 16, padding: 20, textAlign: 'center', color: C.body }}>
+          Measuring the baseline… hold still for a few seconds.
+        </section>
+      )}
       {stage === 'idle' && (
         <section style={{ background: C.panel, border: `1px dashed ${C.line2}`, borderRadius: 16, padding: 20, display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'center', textAlign: 'center' }}>
           <p style={{ color: C.body, fontSize: 15, lineHeight: 1.5 }}>Stand at the panel. Tap start, then switch off one breaker.</p>
-          <button type="button" onClick={start} style={bigButton(true)}>Start</button>
+          <button type="button" onClick={start} disabled={!healthy} style={{ ...bigButton(true), opacity: healthy ? 1 : 0.45 }}>Start</button>
+          {!healthy && <div style={{ fontFamily: MONO, fontSize: 11, color: C.amber }}>Waiting for the live feed…</div>}
         </section>
       )}
 
@@ -119,6 +143,7 @@ export function HuntView({ live }) {
               <p style={{ color: C.body, fontSize: 15, lineHeight: 1.5 }}>
                 Baseline L1 {fmtInt(baseline.l1)} W · L2 {fmtInt(baseline.l2)} W. Switch off the next breaker; the drop shows here within a second.
               </p>
+              <button type="button" onClick={start} style={{ ...bigButton(false), minHeight: 44, alignSelf: 'flex-start' }}>Re-baseline</button>
             </>
           ) : (
             <>

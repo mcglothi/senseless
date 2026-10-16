@@ -219,9 +219,12 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         if origin and origin.split("://", 1)[-1] != req.host:
             raise web.HTTPForbidden(text="cross-origin write refused")
         try:
-            return await req.json()
+            body = await req.json()
         except (ValueError, UnicodeDecodeError):
             raise web.HTTPBadRequest(text="expected a JSON body")
+        if not isinstance(body, dict):  # every write takes an object; [] or null must be a 400, not a 500
+            raise web.HTTPBadRequest(text="expected a JSON object")
+        return body
 
     def _bad(e):
         return web.json_response({"error": str(e)}, status=400)

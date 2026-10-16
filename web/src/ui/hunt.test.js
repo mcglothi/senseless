@@ -14,6 +14,17 @@ describe('breaker hunt', () => {
     expect(d.meaningful).toBe(true)
     expect(d.both).toBe(false)
   })
+  it('ignores a step that arrived with the baseline', () => {
+    const d = huntDrop({ t: 100, l1: 90, l2: 1030 }, { l1: 90, l2: 1030 }, [{ t: 100, leg: 2, w: -600 }])
+    expect(d.meaningful).toBe(false)
+  })
+  it('uses the measured change when steps point the other way', () => {
+    const d = huntDrop({ t: 0, l1: 100, l2: 1600 }, { l1: 100, l2: 1000 }, [{ t: 1, leg: 2, w: 400 }])
+    expect(d.l2).toBe(-600)
+  })
+  it('excludes readings timestamped after now', () => {
+    expect(legAverage([{ t: 9, l1: 100, l2: 0 }, { t: 50, l1: 900, l2: 0 }], 5, 10).l1).toBe(100)
+  })
   it('falls back to the leg change when steps were missed', () => {
     const d = huntDrop({ t: 0, l1: 100, l2: 900 }, { l1: 100, l2: 600 }, [])
     expect(d.l2).toBe(-300)
