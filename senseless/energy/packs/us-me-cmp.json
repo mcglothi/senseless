@@ -1,0 +1,130 @@
+{
+  "id": "us-me-cmp",
+  "utility": "Central Maine Power",
+  "region": "US-ME",
+  "currency": "USD",
+  "timezone": "America/New_York",
+  "source": "CMP published delivery schedules and Maine PUC docket 2025-00157",
+  "plans": [
+    {
+      "id": "rate-a",
+      "label": "CMP Rate A (standard residential)",
+      "kind": "delivery",
+      "effective": "2026-07-01",
+      "source": "CMP Electric Delivery Rate Schedule page 10.00, 106th revision",
+      "components": [
+        {
+          "type": "fixed",
+          "per": "month",
+          "amount": 27.37,
+          "includes_kwh": 50
+        },
+        {
+          "type": "energy",
+          "rate": 0.11959
+        }
+      ]
+    },
+    {
+      "id": "a-tou",
+      "label": "CMP Residential Time-of-Use",
+      "kind": "delivery",
+      "effective": "2026-07-01",
+      "source": "cmpco.com/time-of-use-delivery-rate (on-peak 5-9 pm weekdays; holidays not modelled)",
+      "components": [
+        {
+          "type": "fixed",
+          "per": "month",
+          "amount": 24.18,
+          "includes_kwh": 0
+        },
+        {
+          "type": "tou",
+          "periods": [
+            {
+              "name": "on-peak",
+              "rate": 0.428836,
+              "weekdays": [
+                0,
+                1,
+                2,
+                3,
+                4
+              ],
+              "hours": [
+                17,
+                21
+              ],
+              "months": [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12
+              ],
+              "holidays": false
+            }
+          ],
+          "default_rate": 0.06147
+        }
+      ]
+    },
+    {
+      "id": "electric-technology",
+      "label": "CMP Electric Technology rate",
+      "kind": "delivery",
+      "effective": "2026-07-01",
+      "source": "cmpco.com Electric Technology Rate page (unverified against the tariff sheet; expires Jan 2027)",
+      "components": [
+        {
+          "type": "fixed",
+          "per": "month",
+          "amount": 41.24,
+          "includes_kwh": 0
+        },
+        {
+          "type": "energy",
+          "rate": 0.088638
+        }
+      ],
+      "expires": "2027-01-31"
+    }
+  ],
+  "supply": [
+    {
+      "id": "standard-offer-2026",
+      "label": "Maine Standard Offer (CMP residential)",
+      "kind": "supply",
+      "effective": "2026-01-01",
+      "expires": "2026-12-31",
+      "source": "Maine PUC docket 2025-00157",
+      "components": [
+        {
+          "type": "energy",
+          "rate": 0.12721
+        }
+      ]
+    }
+  ],
+  "taxes": [
+    {
+      "rate": 0.055,
+      "exempt_kwh": 750,
+      "applies_to": [
+        "energy",
+        "tiered",
+        "tou",
+        "rider"
+      ],
+      "fixed_taxed": false,
+      "label": "Maine sales tax"
+    }
+  ]
+}

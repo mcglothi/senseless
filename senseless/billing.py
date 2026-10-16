@@ -1,276 +1,98 @@
-"""Bills the way the utility writes them: a fixed monthly charge, delivery per kWh (flat or time-of-use),
-supply per kWh, and sales tax above an exempt monthly amount. Sense's own "cost" is one flat rate per kWh,
-which in Maine misses the delivery half of the bill.
-
-Presets carry the published tariffs (with their source and effective date) so a bill can be estimated
-for any kWh, and the current billing cycle can be projected and compared across rate plans. Settings and
-entered bills live in settings.db.
-"""
-
-import csv
-import io
+"""Billing settings, cycles, bills and insights; energy modules own parsing/storage/pricing."""
+import copy
 import json
-import logging
 import math
-import re
 import sqlite3
-import sys
 import threading
 import time
 from contextlib import contextmanager
-from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from .summary import local_tz
+from .energy import BillingError
+from .energy import tariff
+from .energy.usage import UsageStore
+from .energy.importers import import_data as parse_import, preview as preview_import, check_bill as imported_bill_check
+from .energy.importers.csv_generic import AVANGRID as METER_HEADER, parse as parse_csv, validate_profile
+from .energy.importers.bill_cmp import parse_cmp_bill_text, parse_cmp_bill_pdf, check as _bill_check
 
-# Published tariffs. Delivery includes transmission and Efficiency Maine charges (CMP's sheets say so).
-PLANS = {
-    "cmp-a": {
-        "label": "CMP Rate A (standard residential)",
-        "fixed": 27.37, "fixed_kwh": 50, "delivery": 0.119590, "tou": None,
-        "source": "CMP Electric Delivery Rate Schedule page 10.00, 106th revision", "effective": "2026-07-01",
-    },
-    "cmp-a-tou": {
-        "label": "CMP Residential Time-of-Use",
-        "fixed": 24.18, "fixed_kwh": 0, "delivery": None,
-        "tou": {"on": 0.428836, "off": 0.061470, "start_hour": 17, "end_hour": 21, "weekdays_only": True},
-        "source": "cmpco.com/time-of-use-delivery-rate (on-peak 5-9 pm weekdays; holidays not modelled)", "effective": "2026-07-01",
-    },
-    "cmp-et": {
-        "label": "CMP Electric Technology rate",
-        "fixed": 41.24, "fixed_kwh": 0, "delivery": 0.088638, "tou": None,
-        "source": "cmpco.com Electric Technology Rate page (unverified against the tariff sheet; expires Jan 2027)", "effective": "2026-07-01",
-    },
-    "custom": {
-        "label": "Custom", "fixed": 0.0, "fixed_kwh": 0, "delivery": 0.0, "tou": None, "source": "entered by you", "effective": None,
-    },
-}
-
-SUPPLY = {"label": "Maine Standard Offer (CMP residential)", "per_kwh": 0.127210,
-          "source": "Maine PUC docket 2025-00157", "effective": "2026-01-01", "until": "2026-12-31"}
-
-DEFAULTS = {
-    "plan": "cmp-a",
-    "supply_per_kwh": SUPPLY["per_kwh"],
-    "supplier": SUPPLY["label"],
-    "billing_day": 1,            # day of month the cycle starts (your meter-read date)
-    "tax_rate": 0.055,           # Maine sales tax
-    "tax_exempt_kwh": 750,       # first 750 kWh/month of residential electricity is exempt
-    "custom": {"fixed": 0.0, "fixed_kwh": 0, "delivery": 0.0},
-    "calibrate": False,          # scale estimates by how far off they were on entered bills
-}
-
-NUM_LIMITS = {"supply_per_kwh": (0, 2), "tax_rate": (0, 0.5), "tax_exempt_kwh": (0, 100000)}
 MAX_IMPORT_BYTES = 20 * 1024 * 1024
-METER_HEADER = "Name,Address,Account Number,Service,Type,Date,Start Time,End Time,Net,Units,Costs,Weather,Delivered,Received".split(",")
 BILL_COLUMNS = {"bill_date": "TEXT", "delivery_total": "REAL", "supply_total": "REAL",
                 "delivery_tax": "REAL", "supply_tax": "REAL", "fixed_total": "REAL",
-                "supply_rate": "REAL", "segments_json": "TEXT", "source": "TEXT DEFAULT 'manual'"}
+                "supply_rate": "REAL", "segments_json": "TEXT", "source": "TEXT DEFAULT 'manual'",
+                "lines_json": "TEXT", "tariff_json": "TEXT"}
+_CMP = tariff.builtin_packs()['us-me-cmp']
 
 
-class BillingError(ValueError):
-    pass
+def _legacy_plan(plan, pid=None):
+    components = plan['components']
+    fixed = sum(c['amount'] * (30.44 if c['per'] == 'day' else 1) for c in components if c['type'] == 'fixed')
+    allowance = sum(c.get('includes_kwh', 0) for c in components if c['type'] == 'fixed')
+    energy = next((c['rate'] for c in components if c['type'] == 'energy'), 0.0)
+    component = next((c for c in components if c['type'] == 'tou'), None)
+    tou = None
+    if component:
+        first = component['periods'][0]
+        tou = {'on': first['rate'], 'off': component['default_rate'], 'start_hour': first['hours'][0],
+               'end_hour': first['hours'][1], 'weekdays_only': first.get('weekdays') == [0, 1, 2, 3, 4],
+               'periods': component['periods']}
+    return {'id': pid or plan['id'], 'label': plan['label'], 'fixed': fixed, 'fixed_kwh': allowance,
+            'delivery': None if tou else energy, 'tou': tou, 'source': plan['source'],
+            'effective': plan['effective'], 'components': components,
+            **({'expires': plan['expires']} if 'expires' in plan else {})}
 
 
-def _finite(text: str) -> float:
-    value = float(text.replace(",", ""))
-    if not math.isfinite(value):
-        raise ValueError
-    return value
+# Compatibility catalogs are derived from data; existing consumers can still use cmp-* ids.
+PLANS = {old: _legacy_plan(tariff.selected_plan(_CMP, old), old) for old in tariff.ALIASES}
+PLANS['custom'] = {'id': 'custom', 'label': 'Custom', 'fixed': 0.0, 'fixed_kwh': 0,
+                   'delivery': 0.0, 'tou': None, 'source': 'entered by you', 'effective': None}
+_supply = _CMP['supply'][0]
+SUPPLY = {'label': _supply['label'], 'per_kwh': _supply['components'][0]['rate'],
+          'source': _supply['source'], 'effective': _supply['effective'], 'until': _supply['expires']}
+DEFAULTS = {'pack': 'us-me-cmp', 'plan': 'rate-a', 'supply': 'standard-offer-2026',
+            'supply_per_kwh': SUPPLY['per_kwh'], 'supplier': SUPPLY['label'], 'billing_day': 1,
+            'tax_rate': _CMP['taxes'][0]['rate'], 'tax_exempt_kwh': _CMP['taxes'][0]['exempt_kwh'],
+            'custom': {'fixed': 0.0, 'fixed_kwh': 0, 'delivery': 0.0}, 'calibrate': False}
+NUM_LIMITS = {'supply_per_kwh': (0, 2), 'tax_rate': (0, 0.5), 'tax_exempt_kwh': (0, 100000)}
 
 
-def parse_meter_csv(text: str) -> list[tuple]:
-    """Discard identity columns immediately; errors never include uploaded values."""
-    try:
-        reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")), strict=True)
-        if reader.fieldnames != METER_HEADER:
-            raise ValueError
-        rows = {}
-        for row in reader:
-            if None in row or any(v is None for v in row.values()) or row["Units"] != "kWh":
-                raise ValueError
-            start = datetime.fromisoformat(row["Start Time"])
-            if start.utcoffset() is None or start.minute or start.second or start.microsecond:
-                raise ValueError
-            ts = int(start.timestamp())
-            rows[ts] = (ts, _finite(row["Net"]), *(_finite(row[k]) if row[k].strip() else None
-                                                  for k in ("Weather", "Delivered", "Received")))
-        if not rows:
-            raise ValueError
-        return list(rows.values())
-    except (ValueError, TypeError, OverflowError, csv.Error):
-        raise BillingError("invalid hourly meter CSV (offset timestamps and kWh units required)") from None
+def parse_meter_csv(text):
+    """Compatibility wrapper; new imports retain intervals through the registry."""
+    rows = parse_csv(text.encode())['rows']
+    return [(ts, kwh, temp, kwh + (received or 0), received) for ts, seconds, kwh, temp, received in rows]
 
 
-def parse_cmp_bill_text(text: str) -> dict:
-    """Pure CMP text parser. Only explicitly selected dates and numbers leave this function.
-
-    Split bills sometimes omit printed rates: infer those from the segment's rounded charge/kWh.
-    Never keep meter readings, identifiers, supplier/customer text, or the original document.
-    """
-    number = r"\d[\d,]*(?:\.\d+)?"
-    day = r"\d{2}/\d{2}/\d{4}"
-    text = " ".join(text.replace("–", "-").split())
-
-    def match(pattern, source=text):
-        found = re.search(pattern, source, re.I)
-        if found is None:
-            raise ValueError
-        return found
-
-    def iso(value):
-        return datetime.strptime(value, "%m/%d/%Y").date().isoformat()
-
-    try:
-        bill_date = iso(match(rf"Bill Date\s+({day})")[1])
-        meter = match(rf"\S+\s+({day})\s+{number}\s+({day})\s+{number}\s+(\d+)\s+({number})(?![\d,.])")
-        end, start, days, kwh = iso(meter[1]), iso(meter[2]), int(meter[3]), _finite(meter[4])
-        if not 7 <= (date.fromisoformat(end) - date.fromisoformat(start)).days <= 62 or not 0 < kwh < 100000:
-            raise ValueError
-        if days != (date.fromisoformat(end) - date.fromisoformat(start)).days:
-            raise ValueError
-        delivery_end = match(rf"Total Current Delivery Charges\s+\+?\$\s*({number})")
-        supply_end = match(rf"Total New Supplier Charges\s+\+?\$\s*({number})")
-        headings = list(re.finditer(rf"Delivery Charges:\s*Residential\s*\(\s*({day})\s*-\s*({day})\s*\)", text, re.I))
-        if not 1 <= len(headings) <= 2:
-            raise ValueError
-        segments = []
-        for i, heading in enumerate(headings):
-            body = text[heading.end():headings[i + 1].start() if i + 1 < len(headings) else delivery_end.start()]
-            fixed = match(rf"Up to\s+({number})\s*KWH\s*(?:@\s*\$\s*({number})\s*)?\+\$\s*({number})", body)
-            variable = match(rf"({number})\s*KWH\s*(?:@\s*\$\s*({number})\s*)?\+\$\s*({number})", body[fixed.end():])
-            allowance, charge, used, variable_charge = map(_finite, (fixed[1], fixed[3], variable[1], variable[3]))
-            rate = _finite(variable[2]) if variable[2] else variable_charge / used if used else 0.0
-            segment_start, segment_end = iso(heading[1]), iso(heading[2])
-            if segment_start > segment_end or not start <= segment_start <= segment_end <= end:
-                raise ValueError
-            segments.append({"start": segment_start, "end": segment_end, "kwh": allowance + used,
-                             "fixed_kwh": allowance, "fixed": charge, "delivery_rate": rate})
-        if abs(sum(s["kwh"] for s in segments) - kwh) > 0.01:
-            raise ValueError
-        # supply is one line, or one per segment when the supply price changed mid-cycle (each January)
-        energies = list(re.finditer(rf"Energy Charge\s+({number})\s*KWH\s*@\s*\$\s*({number})\s*\+\$\s*({number})", text, re.I))
-        if not 1 <= len(energies) <= 2 or abs(sum(_finite(e[1]) for e in energies) - kwh) > 0.01:
-            raise ValueError
-        energy = energies[-1]
-        supply_rate = (energies[0][2] and _finite(energies[0][2])) if len(energies) == 1 else \
-            sum(_finite(e[3]) for e in energies) / kwh        # kWh-weighted, so kWh x rate = the energy charges
-
-        def tax(body):
-            found = re.search(rf"Maine Sales Tax\s+\+?\$\s*({number})", body, re.I)
-            return _finite(found[1]) if found else 0.0
-
-        delivery_total, supply_total = _finite(delivery_end[1]), _finite(supply_end[1])
-        return {"start": start, "end": end, "kwh": kwh, "amount": round(delivery_total + supply_total, 2),
-                "bill_date": bill_date, "delivery_total": delivery_total, "supply_total": supply_total,
-                "delivery_tax": tax(text[headings[0].start():delivery_end.start()]),
-                "supply_tax": tax(text[energy.end():supply_end.start()]),
-                "fixed_total": round(sum(s["fixed"] for s in segments), 2), "supply_rate": round(supply_rate, 6),
-                "segments_json": json.dumps(segments), "source": "bill-pdf"}
-    except (ValueError, TypeError, OverflowError, ZeroDivisionError):
-        raise BillingError("unsupported or incomplete CMP bill") from None
+def _custom_plan(settings):
+    custom = {**DEFAULTS['custom'], **settings.get('custom', {})}
+    return {'id': 'custom', 'label': 'Custom', 'kind': 'delivery', 'effective': '1970-01-01',
+            'source': 'entered by you', 'components': [
+                {'type': 'fixed', 'per': 'month', 'amount': custom['fixed'], 'includes_kwh': custom['fixed_kwh']},
+                {'type': 'energy', 'rate': custom['delivery']}]}
 
 
-# pypdf diagnostics may quote document bytes. Silence them only in the importing context,
-# leaving other threads' logging intact. Exceptions are also replaced with a constant error.
-_private_pdf = ContextVar("private_billing_pdf", default=False)
+def pricing_pack(settings, pack=None):
+    result = copy.deepcopy(pack or _CMP)
+    if result['id'] == 'us-me-cmp':
+        result['plans'].append(_custom_plan(settings))
+        # Preserve existing numeric overrides for CMP/custom. Other packs use their data unchanged.
+        for supply in result['supply']:
+            if supply['id'] == settings.get('supply', DEFAULTS['supply']):
+                supply['components'] = [{'type': 'energy', 'rate': settings.get('supply_per_kwh', SUPPLY['per_kwh'])}]
+        result['taxes'][0].update(rate=settings.get('tax_rate', DEFAULTS['tax_rate']),
+                                  exempt_kwh=settings.get('tax_exempt_kwh', DEFAULTS['tax_exempt_kwh']))
+    return result
 
 
-class _PDFPrivacyFilter(logging.Filter):
-    def filter(self, record):
-        return not _private_pdf.get()
+def plan_for(settings, plan_id=None, pack=None):
+    pid = plan_id or settings['plan']
+    return _legacy_plan(tariff.selected_plan(pricing_pack(settings, pack), pid), pid)
 
 
-def parse_cmp_bill_pdf(data: bytes) -> dict:
-    from pypdf import PdfReader
-
-    # pypdf uses module loggers; filters on the parent logger do not filter descendants.
-    # Some modules create their logger only on the first diagnostic, so include
-    # imported modules as well as already-created loggers.
-    for name in set(sys.modules) | set(logging.Logger.manager.loggerDict):
-        if name == "pypdf" or name.startswith("pypdf."):
-            logger = logging.getLogger(name)
-            if not any(isinstance(f, _PDFPrivacyFilter) for f in logger.filters):
-                logger.addFilter(_PDFPrivacyFilter())
-    token = _private_pdf.set(True)
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        return parse_cmp_bill_text("\n".join(page.extract_text() or "" for page in reader.pages))
-    except Exception:
-        raise BillingError("unsupported or unreadable CMP PDF") from None
-    finally:
-        _private_pdf.reset(token)
-
-
-def _bill_check(bill: dict) -> dict | None:
-    """Price a historical bill with its own fixed charges, allowances, and rates."""
-    if not bill.get("segments_json") or bill.get("supply_rate") is None:
-        return None
-    segments = json.loads(bill["segments_json"])
-    kwh = bill["kwh"]
-    taxable = max(0.0, kwh - 750)
-    delivery = sum(s["fixed"] + max(0.0, s["kwh"] - s["fixed_kwh"]) * s["delivery_rate"] for s in segments)
-    delivery_tax = round(sum(taxable * s["kwh"] / kwh * s["delivery_rate"] * 0.055 for s in segments), 2)
-    supply = round(kwh * bill["supply_rate"], 2)
-    supply_tax = round(taxable * bill["supply_rate"] * 0.055, 2)
-    total = round(round(delivery, 2) + delivery_tax + supply + supply_tax, 2)
-    return {"model_total": total, "diff": round(bill["amount"] - total, 2)}
-
-
-def plan_for(settings: dict, plan_id: str | None = None) -> dict:
-    pid = plan_id or settings["plan"]
-    if pid not in PLANS:
-        raise BillingError(f"unknown plan {pid}")
-    p = dict(PLANS[pid], id=pid)
-    if pid == "custom":
-        p.update(settings.get("custom") or {})
-    return p
-
-
-def _total(p: dict, settings: dict, kwh: float, on: float | None, months: float) -> dict:
-    fixed = p["fixed"] * months
-    if p["tou"]:
-        on = min(max(on, 0.0), kwh)
-        delivery = on * p["tou"]["on"] + (kwh - on) * p["tou"]["off"]
-    else:
-        delivery = max(0.0, kwh - p["fixed_kwh"] * months) * p["delivery"]
-    supply = kwh * settings["supply_per_kwh"]
-    # Sales tax, as CMP bills it: only kWh above the exemption, at their per-kWh delivery and supply
-    # rates; the fixed charge isn't taxed (Sept 2026 bill: 600 kWh x (11.959 + 12.721)¢ x 5.5% = $8.15).
-    exempt = settings["tax_exempt_kwh"] * months
-    taxable = max(0.0, kwh - exempt)
-    if p["tou"]:
-        per_kwh_delivery = delivery / kwh if kwh else 0.0     # which kWh are "above 750" isn't defined by hour: average
-    else:
-        per_kwh_delivery = p["delivery"] if kwh > p["fixed_kwh"] * months else 0.0
-    tax = taxable * (per_kwh_delivery + settings["supply_per_kwh"]) * settings["tax_rate"]
-    return {"fixed": fixed, "delivery": delivery, "supply": supply, "tax": tax, "total": fixed + delivery + supply + tax}
-
-
-def estimate(settings: dict, kwh: float, on_peak_kwh: float | None = None, plan_id: str | None = None,
-             months: float = 1.0) -> dict:
-    """One bill for `kwh` used over `months` (1 = a normal cycle; fixed charge, included kWh and the tax
-    exemption scale). The marginal rate is what one more kWh would add to this same bill."""
-    if kwh < 0:
-        raise BillingError("kwh must not be negative")
-    p = plan_for(settings, plan_id)
-    if p["tou"] and on_peak_kwh is None:
-        raise BillingError("time-of-use needs on_peak_kwh (or an on-peak share)")
-    t = _total(p, settings, kwh, on_peak_kwh, months)
-    r2 = lambda x: round(x, 2)
-    out = {"plan": p["id"], "plan_label": p["label"], "kwh": round(kwh, 2), "on_peak_kwh": round(on_peak_kwh, 2) if p["tou"] else None,
-           "fixed": r2(t["fixed"]), "delivery": r2(t["delivery"]), "supply": r2(t["supply"]), "tax": r2(t["tax"]), "total": r2(t["total"]),
-           "effective_cents_per_kwh": round(t["total"] / kwh * 100, 2) if kwh else None}
-    if p["tou"]:
-        share = on_peak_kwh / kwh if kwh else 0.0
-        on = _total(p, settings, kwh + 1, on_peak_kwh + 1, months)["total"] - t["total"]
-        off = _total(p, settings, kwh + 1, on_peak_kwh, months)["total"] - t["total"]
-        out.update(marginal_cents_per_kwh=round((share * on + (1 - share) * off) * 100, 2),
-                   marginal_on_cents=round(on * 100, 2), marginal_off_cents=round(off * 100, 2))
-    else:
-        out["marginal_cents_per_kwh"] = round((_total(p, settings, kwh + 1, None, months)["total"] - t["total"]) * 100, 2)
-    return out
+def estimate(settings, kwh, on_peak_kwh=None, plan_id=None, months=1.0, *, pack=None, hourly=None):
+    return tariff.estimate(pricing_pack(settings, pack), plan_id or settings['plan'],
+                           settings.get('supply', DEFAULTS['supply']), kwh,
+                           on_peak_kwh=on_peak_kwh, months=months, hourly=hourly)
 
 
 def bill_months(start: date, end: date) -> float:
@@ -294,6 +116,8 @@ def cycle_bounds(billing_day: int, today: date) -> tuple[date, date]:
 
 
 def is_on_peak(dt: datetime, tou: dict) -> bool:
+    if tou.get('periods'):
+        return any(tariff.period_matches(dt, p) for p in tou['periods'])
     if tou.get("weekdays_only") and dt.weekday() >= 5:
         return False
     return tou["start_hour"] <= dt.hour < tou["end_hour"]
@@ -316,34 +140,154 @@ class Billing:
             for name, kind in BILL_COLUMNS.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE bills ADD COLUMN {name} {kind}")
-            db.execute("""CREATE TABLE IF NOT EXISTS meter_hourly (
-                ts INTEGER PRIMARY KEY, kwh REAL NOT NULL, temp_f REAL, delivered REAL, received REAL)""")
+            # Backfill normalized lines for the already-shipped CMP import schema.
+            for row in db.execute("SELECT * FROM bills WHERE source='bill-pdf'").fetchall():
+                bill = dict(row)
+                lines = []
+                for segment in json.loads(bill.get('segments_json') or '[]'):
+                    lines.extend([
+                        {'label': 'Fixed delivery', 'kind': 'fixed', 'amount': segment['fixed']},
+                        {'label': 'Delivery energy', 'kind': 'delivery',
+                         'amount': round((segment['kwh'] - segment['fixed_kwh']) * segment['delivery_rate'], 2),
+                         'rate': segment['delivery_rate'], 'start': segment['start'], 'end': segment['end']}])
+                delivery_lines = [line for line in lines if line['kind'] == 'delivery']
+                if delivery_lines and bill.get('delivery_total') is not None:
+                    # Retain the printed aggregate when rounded historical rates differ by a cent.
+                    difference = bill['delivery_total'] - (bill.get('delivery_tax') or 0) - sum(line['amount'] for line in lines)
+                    delivery_lines[-1]['amount'] = round(delivery_lines[-1]['amount'] + difference, 2)
+                if bill.get('supply_total') is not None:
+                    lines.append({'label': 'Supply energy', 'kind': 'supply',
+                                  'amount': round(bill['supply_total'] - (bill.get('supply_tax') or 0), 2)})
+                for field, label in [('delivery_tax', 'Delivery tax'), ('supply_tax', 'Supply tax')]:
+                    if bill.get(field) is not None:
+                        lines.append({'label': label, 'kind': 'tax', 'amount': bill[field]})
+                db.execute("UPDATE bills SET lines_json=?, source='bill-cmp' WHERE id=?",
+                           (json.dumps(lines), bill['id']))
+            db.execute('CREATE TABLE IF NOT EXISTS csv_profiles (name TEXT PRIMARY KEY, body TEXT NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS user_tariffs (id TEXT PRIMARY KEY, body TEXT NOT NULL)')
+        self.usage = UsageStore(self._conn)
+        self.tariffs = tariff.Tariffs(self._conn)
+        self._migrate_settings()
+
+    def _migrate_settings(self):
+        with self._conn() as db:
+            row = db.execute('SELECT body FROM billing WHERE id=1').fetchone()
+            if row:
+                saved = json.loads(row['body'])
+                saved.setdefault('pack', 'us-me-cmp')
+                saved.setdefault('supply', 'standard-offer-2026')
+                if saved['pack'] == 'us-me-cmp':
+                    saved['plan'] = tariff.ALIASES.get(saved.get('plan'), saved.get('plan', 'rate-a'))
+                db.execute('UPDATE billing SET body=? WHERE id=1', (json.dumps(saved),))
+                if saved.get('custom'):
+                    db.execute('INSERT OR IGNORE INTO user_tariffs VALUES (?,?)', ('custom', json.dumps(_custom_plan(saved))))
+
+    def csv_profiles(self):
+        with self._conn() as db:
+            return [json.loads(r['body']) for r in db.execute('SELECT body FROM csv_profiles ORDER BY name')]
+
+    def save_csv_profile(self, value):
+        profile = validate_profile(value)
+        with self._lock, self._conn() as db:
+            db.execute('INSERT INTO csv_profiles VALUES (?,?) ON CONFLICT(name) DO UPDATE SET body=excluded.body',
+                       (profile['name'], json.dumps(profile)))
+        return profile
+
+    def remove_csv_profile(self, name):
+        with self._conn() as db:
+            if not db.execute('DELETE FROM csv_profiles WHERE name=?', (name,)).rowcount:
+                raise KeyError(name)
+
+    def preview_import(self, data):
+        if len(data) > MAX_IMPORT_BYTES:
+            raise BillingError('upload exceeds 20 MiB')
+        return preview_import(data, self.csv_profiles())
 
     def import_data(self, data: bytes) -> dict:
         if len(data) > MAX_IMPORT_BYTES:
-            raise BillingError("upload exceeds 20 MiB")
-        if data.startswith(b"%PDF-"):
-            parsed = parse_cmp_bill_pdf(data)
-            return {"kind": "bill-pdf", **self._save_bill(parsed)}
-        try:
-            rows = parse_meter_csv(data.decode("utf-8-sig"))
-        except UnicodeError:
-            raise BillingError("expected hourly meter CSV or CMP PDF") from None
-        added = updated = 0
-        with self._lock, self._conn() as db:
-            db.execute("BEGIN IMMEDIATE")
-            for row in rows:
-                if db.execute("SELECT 1 FROM meter_hourly WHERE ts=?", (row[0],)).fetchone():
-                    updated += 1
-                else:
-                    added += 1
-                db.execute("""INSERT INTO meter_hourly VALUES (?,?,?,?,?) ON CONFLICT(ts) DO UPDATE SET
-                    kwh=excluded.kwh, temp_f=excluded.temp_f, delivered=excluded.delivered, received=excluded.received""", row)
-        return {"kind": "meter-csv", "added": added, "updated": updated,
-                "from": min(r[0] for r in rows), "to": max(r[0] for r in rows)}
+            raise BillingError('upload exceeds 20 MiB')
+        result = parse_import(data, self.csv_profiles())
+        metadata = {k: result[k] for k in ('importer', 'label')}
+        if result['kind'] == 'bill':
+            return {'kind': 'bill-pdf', **self._save_bill(result['bill']), **metadata}
+        return {'kind': 'meter-csv', **self.usage.save(result['rows'], result['source']), **metadata}
+
+    def _pricing_pack(self, settings):
+        pack = pricing_pack(settings, self.tariffs.get(settings['pack']))
+        if settings['pack'] == 'us-me-cmp':
+            with self._conn() as db:
+                row = db.execute("SELECT body FROM user_tariffs WHERE id='custom'").fetchone()
+            if row:
+                pack['plans'] = [p for p in pack['plans'] if p['id'] != 'custom'] + [json.loads(row['body'])]
+        return pack
+
+    def estimate(self, kwh, on_peak_kwh=None, plan_id=None, months=1.0, *, hourly=None, days=None):
+        settings = self.settings()
+        return tariff.estimate(self._pricing_pack(settings), plan_id or settings['plan'], settings['supply'], kwh,
+                               on_peak_kwh=on_peak_kwh, months=months, hourly=hourly, days=days)
+
+    def plan(self, settings=None, plan_id=None):
+        settings = settings or self.settings()
+        pack = self._pricing_pack(settings)
+        selected = tariff.selected_plan(pack, plan_id or settings['plan'])
+        view = _legacy_plan(selected, plan_id or settings['plan'])
+        if selected['kind'] != 'bundled':
+            supply = next((item for item in pack['supply'] if item['id'] == settings['supply']), None)
+            if supply:
+                view['fixed'] += sum(c['amount'] * (30.44 if c['per'] == 'day' else 1) for c in supply['components'] if c['type'] == 'fixed')
+                if not view['tou']:
+                    view['tou'] = _legacy_plan(supply)['tou']
+        return view
+
+    def plans(self):
+        current = {pid: self.plan(plan_id=pid) for pid in self.plan_ids()}
+        return {**PLANS, **current} if self.settings()['pack'] == 'us-me-cmp' else current
+
+    def supply_info(self):
+        settings = self.settings()
+        pack = self.tariffs.get(settings['pack'])
+        plan = tariff.selected_plan(pricing_pack(settings, pack), settings['plan'])
+        if plan['kind'] == 'bundled' or settings['supply'] is None:
+            return None
+        item = next(p for p in pack['supply'] if p['id'] == settings['supply'])
+        if settings['pack'] == 'us-me-cmp':
+            return {**SUPPLY, 'per_kwh': settings['supply_per_kwh'], 'label': settings['supplier']}
+        energy = [c['rate'] for c in item['components'] if c['type'] in ('energy', 'rider')]
+        return {'id': item['id'], 'label': item['label'], 'source': item['source'], 'effective': item['effective'],
+                'until': item.get('expires'), 'per_kwh': sum(energy) if energy else None,
+                'components': item['components']}
+
+    def plan_ids(self, settings=None):
+        settings = settings or self.settings()
+        ids = [p['id'] for p in self.tariffs.get(settings['pack'])['plans']]
+        if settings['pack'] == 'us-me-cmp' and (settings['plan'] == 'custom' or any(settings['custom'].values())):
+            ids.append('custom')
+        return ids
+
+    def save_tariff(self, value):
+        pack = tariff.validate_pack(value)
+        with self._lock:
+            settings = self.settings()
+            if settings['pack'] == pack['id']:
+                plan = tariff.selected_plan(pack, settings['plan'])
+                if plan['kind'] != 'bundled' and settings['supply'] not in {p['id'] for p in pack['supply']}:
+                    if settings['supply'] is not None or pack['supply']:
+                        raise BillingError('replacement removes the selected supply')
+                if plan['kind'] == 'bundled' and settings['supply'] is not None:
+                    raise BillingError('replacement changes the selected plan kind')
+            return self.tariffs.save(pack)
+
+    def remove_tariff(self, pack_id):
+        with self._lock:
+            if self.settings()['pack'] == pack_id and pack_id not in self.tariffs.builtins:
+                raise BillingError('cannot delete the selected tariff pack')
+            self.tariffs.remove(pack_id)
 
     def _save_bill(self, values: dict) -> dict:
-        # Both call sites supply only whitelisted fields, never the user's entire object.
+        values = dict(values)
+        if 'lines' in values:
+            values['lines_json'] = json.dumps(values.pop('lines'))
+        # All callers pass only normalized, explicitly selected fields.
         with self._lock, self._conn() as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT id FROM bills WHERE start=? AND end=? ORDER BY id DESC",
@@ -381,40 +325,57 @@ class Billing:
 
     def update(self, patch: dict) -> dict:
         if not isinstance(patch, dict):
-            raise BillingError("expected an object")
-        unknown = set(patch) - set(DEFAULTS)
-        if unknown:
-            raise BillingError(f"unknown fields: {', '.join(sorted(unknown))}")
+            raise BillingError('expected an object')
+        if set(patch) - set(DEFAULTS):
+            raise BillingError('unknown billing settings fields')
         with self._lock:
             s = self.settings()
             for k, v in patch.items():
-                if k == "plan":
-                    if v not in PLANS:
-                        raise BillingError("plan must be one of " + ", ".join(PLANS))
-                elif k == "supplier":
+                if k in ('pack', 'plan', 'supply'):
+                    if not isinstance(v, str) and not (k == 'supply' and v is None):
+                        raise BillingError('invalid tariff selection')
+                elif k == 'supplier':
                     if not isinstance(v, str) or not v.strip() or len(v) > 60:
-                        raise BillingError("supplier must be a short name")
+                        raise BillingError('supplier must be a short name')
                     v = v.strip()
-                elif k == "billing_day":
+                elif k == 'billing_day':
                     if type(v) is not int or not 1 <= v <= 31:
-                        raise BillingError("billing_day must be a whole number from 1 to 31")
-                elif k == "calibrate":
+                        raise BillingError('billing_day must be a whole number from 1 to 31')
+                elif k == 'calibrate':
                     if type(v) is not bool:
-                        raise BillingError("calibrate must be true or false")
-                elif k == "custom":
-                    if not isinstance(v, dict) or set(v) - {"fixed", "fixed_kwh", "delivery"}:
-                        raise BillingError("custom takes fixed, fixed_kwh and delivery")
+                        raise BillingError('calibrate must be true or false')
+                elif k == 'custom':
+                    if not isinstance(v, dict) or set(v) - {'fixed', 'fixed_kwh', 'delivery'}:
+                        raise BillingError('custom takes fixed, fixed_kwh and delivery')
                     for ck, cv in v.items():
-                        if not _num(cv) or not 0 <= cv <= (10000 if ck == "fixed_kwh" else 1000 if ck == "fixed" else 2):
-                            raise BillingError(f"custom.{ck} is out of range")
-                    v = {**s["custom"], **v}
+                        if not _num(cv) or not 0 <= cv <= (10000 if ck == 'fixed_kwh' else 1000 if ck == 'fixed' else 2):
+                            raise BillingError('custom rate is out of range')
+                    v = {**s['custom'], **v}
                 else:
                     lo, hi = NUM_LIMITS[k]
                     if not _num(v) or not lo <= v <= hi:
-                        raise BillingError(f"{k} must be a number from {lo} to {hi}")
+                        raise BillingError('billing number is out of range')
                 s[k] = v
+            pack = self.tariffs.get(s['pack'])
+            if 'pack' in patch and 'plan' not in patch:
+                s['plan'] = pack['plans'][0]['id']
+            if 'pack' in patch and 'supply' not in patch:
+                s['supply'] = pack['supply'][0]['id'] if pack['supply'] else None
+            if s['pack'] == 'us-me-cmp':
+                s['plan'] = tariff.ALIASES.get(s['plan'], s['plan'])
+            plan = tariff.selected_plan(pricing_pack(s, pack), s['plan'])
+            if plan['kind'] == 'bundled':
+                s['supply'] = None
+            elif s['supply'] not in {item['id'] for item in pack['supply']}:
+                if s['supply'] is not None or pack['supply']:
+                    raise BillingError('unknown supply')
+            if s['pack'] != 'us-me-cmp' and set(patch) & {'supply_per_kwh', 'tax_rate', 'tax_exempt_kwh', 'custom'}:
+                raise BillingError('edit the user tariff pack to change its components')
             with self._conn() as db:
-                db.execute("INSERT INTO billing (id, body) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET body=excluded.body", (json.dumps(s),))
+                db.execute('INSERT INTO billing (id, body) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET body=excluded.body', (json.dumps(s),))
+                if s['pack'] == 'us-me-cmp' and ('custom' in patch or s['plan'] == 'custom'):
+                    db.execute('INSERT INTO user_tariffs VALUES (?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body',
+                               ('custom', json.dumps(_custom_plan(s))))
         return s
 
     # ── entered bills (to check the model against reality) ─────────────
@@ -422,14 +383,23 @@ class Billing:
         s = self.settings()
         with self._conn() as db:
             rows = [dict(r) for r in db.execute("SELECT * FROM bills ORDER BY start DESC")]
-        tou = bool(plan_for(s)["tou"])
+        tou = bool(self.plan(s)["tou"])
         for b in rows:
+            b["lines"] = json.loads(b.get("lines_json") or "[]")
             months = bill_months(date.fromisoformat(b["start"]), date.fromisoformat(b["end"]))
-            if tou and b.get("on_peak_kwh") is None:
+            selected = self.plan(s)
+            if tou and (b.get('on_peak_kwh') is None or len(selected['tou'].get('periods', [])) > 1):
                 # can't price a time-of-use bill without its on-peak kWh: shown, but not compared or calibrated
                 b["estimate"] = b["diff"] = b["ratio"] = None
                 continue
-            est = estimate(s, b["kwh"], on_peak_kwh=b.get("on_peak_kwh") if tou else None, months=months)
+            try:
+                est = self.estimate(b['kwh'], on_peak_kwh=b.get('on_peak_kwh') if tou else None, months=months,
+                                    days=(date.fromisoformat(b['end']) - date.fromisoformat(b['start'])).days)
+            except BillingError:
+                if not tou:
+                    raise
+                b['estimate'] = b['diff'] = b['ratio'] = None
+                continue
             b["estimate"] = est["total"]
             b["diff"] = round(b["amount"] - est["total"], 2)
             b["ratio"] = round(b["amount"] / est["total"], 3) if est["total"] else None
@@ -448,10 +418,10 @@ class Billing:
         if on is not None and (not _num(on) or not 0 <= on <= kwh):
             raise BillingError("on_peak_kwh must be a number from 0 to kwh")
         s = self.settings()
-        p = plan_for(s)
+        p = self.plan(s)
         values = {"start": start.isoformat(), "end": end.isoformat(), "kwh": float(kwh), "amount": float(amount),
                   "on_peak_kwh": float(on) if on is not None else None, "source": "manual"}
-        if not p["tou"] or on is not None:
+        if s["pack"] == "us-me-cmp" and (not p["tou"] or on is not None):
             months = bill_months(start, end)
             segment = {"start": start.isoformat(), "end": end.isoformat(), "kwh": kwh,
                        "fixed": p["fixed"] * months, "fixed_kwh": p["fixed_kwh"] * months,
@@ -460,6 +430,8 @@ class Billing:
                 segment.update(tou=p["tou"], delivery_rate=(on * p["tou"]["on"] + (kwh - on) * p["tou"]["off"]) / kwh)
             values.update(fixed_total=p["fixed"] * months, supply_rate=s["supply_per_kwh"], segments_json=json.dumps([
                 segment]))
+        if s['pack'] != 'us-me-cmp':
+            values['tariff_json'] = self._tariff_snapshot(s)
         return self._save_bill(values)
 
     def remove_bill(self, bill_id: int) -> None:
@@ -467,8 +439,24 @@ class Billing:
             if not db.execute("DELETE FROM bills WHERE id=?", (bill_id,)).rowcount:
                 raise KeyError(bill_id)
 
+    def _tariff_snapshot(self, settings):
+        pack = self._pricing_pack(settings)
+        plan = tariff.selected_plan(pack, settings['plan'])
+        supply = next((p for p in pack['supply'] if p['id'] == settings['supply'] and plan['kind'] != 'bundled'), None)
+        fields = ('id', 'kind', 'effective', 'expires', 'components')
+        return json.dumps({'pack': pack['id'], 'timezone': pack['timezone'],
+                           'plan': {k: plan[k] for k in fields if k in plan},
+                           'supply': {k: supply[k] for k in fields if k in supply} if supply else None,
+                           'taxes': [{k: v for k, v in tax.items() if k != 'label'} for tax in pack['taxes']]}, sort_keys=True)
+
     def calibration(self) -> float | None:
-        p = plan_for(self.settings())
+        settings = self.settings()
+        if settings['pack'] != 'us-me-cmp':
+            snapshot = self._tariff_snapshot(settings)
+            ratios = [b['ratio'] for b in self.bills() if b.get('tariff_json') == snapshot
+                      and b['ratio'] is not None and self.check_bill(b) is not None]
+            return round(sum(ratios) / len(ratios), 3) if ratios else None
+        p = self.plan()
         ratios = []
         for b in self.bills():
             if not b["ratio"] or not b.get("segments_json"):
@@ -487,8 +475,7 @@ class Billing:
 
     # ── meter-backed analysis ───────────────────────────────────────────
     def _meter_rows(self) -> list[dict]:
-        with self._conn() as db:
-            return [dict(r) for r in db.execute("SELECT * FROM meter_hourly ORDER BY ts")]
+        return self.usage.hourly()
 
     @staticmethod
     def _meter_days(rows: list[dict]) -> dict:
@@ -498,7 +485,7 @@ class Billing:
             day = datetime.fromtimestamp(row["ts"], tz).date()
             item = days.setdefault(day, {"kwh": 0.0, "temps": [], "hours": 0})
             item["kwh"] += row["kwh"]
-            item["hours"] += 1
+            item["hours"] += row.get("coverage_seconds", 3600) / 3600
             if row["temp_f"] is not None:
                 item["temps"].append(row["temp_f"])
         return days
@@ -519,23 +506,27 @@ class Billing:
         if sum(self._complete_day(d, item) for d, item in daily.items()) < 300:
             return None
         s = self.settings()
-        c = s["custom"]
-        # the published plans, plus "custom" only once it's been filled in (all zeros means unused)
-        plan_ids = [pid for pid in PLANS if pid != "custom" or s["plan"] == "custom" or c["fixed"] or c["delivery"]]
+        plan_ids = self.plan_ids(s)
+        tou_plan = next((self.plan(s, pid)['tou'] for pid in plan_ids if self.plan(s, pid)['tou']), None)
         monthly = {}
         for r in window:
             dt = datetime.fromtimestamp(r["ts"], tz)
-            item = monthly.setdefault(dt.strftime("%Y-%m"), {"kwh": 0.0, "on": 0.0})
+            item = monthly.setdefault(dt.strftime("%Y-%m"), {"kwh": 0.0, "on": 0.0, "rows": []})
             item["kwh"] += r["kwh"]
-            if is_on_peak(dt, PLANS["cmp-a-tou"]["tou"]):
+            item['rows'].append({'ts': r['ts'], 'kwh': max(0, r['kwh'])})
+            if tou_plan and is_on_peak(dt, tou_plan):
                 item["on"] += r["kwh"]
         months = []
         d = start
         while d < end:
             key = d.strftime("%Y-%m")
-            item = monthly.get(key, {"kwh": 0.0, "on": 0.0})
+            item = monthly.get(key, {"kwh": 0.0, "on": 0.0, "rows": []})
             kwh = max(0.0, item["kwh"])
-            totals = {pid: estimate(s, kwh, item["on"], pid)["total"] for pid in plan_ids}
+            # Negative net-export readings are not consumption; preserve aggregate net kWh,
+            # scaling positive hours to it so the engine gets a consistent profile.
+            profile = self._scaled_profile(item['rows'], kwh)
+            month_days = ((d + timedelta(days=32)).replace(day=1) - d).days
+            totals = {pid: self.estimate(kwh, item['on'], pid, hourly=profile, days=month_days)['total'] for pid in plan_ids}
             months.append({"month": key, "kwh": round(kwh, 3), "on_peak_share": round(item["on"] / kwh, 5) if kwh else 0.0,
                            "totals": totals})
             d = (d + timedelta(days=32)).replace(day=1)
@@ -568,12 +559,39 @@ class Billing:
         bills = []
         for b in self.bills():
             bills.append({k: b[k] for k in ("start", "end", "kwh", "amount")})
-            bills[-1].update(effective_cents_per_kwh=round(b["amount"] / b["kwh"] * 100, 2), check=_bill_check(b))
+            bills[-1].update(effective_cents_per_kwh=round(b["amount"] / b["kwh"] * 100, 2), check=self.check_bill(b))
         return {"meter": {"hours": len(rows), "from": rows[0]["ts"], "to": rows[-1]["ts"]} if rows else None,
                 "sense_vs_meter": comparison, "plans_12mo": self._plans_12mo(rows, today),
                 "weather": {"bins": [{"from_f": lo, "to_f": lo + 10, "days": len(values),
                                       "kwh_per_day": round(sum(values) / len(values), 3)} for lo, values in sorted(bins.items())]} if bins else None,
                 "bills": bills}
+
+    def check_bill(self, bill):
+        own_check = imported_bill_check(bill)
+        if own_check is not None:
+            return own_check
+        if bill.get('source') == 'bill-pdf':
+            return _bill_check(bill)
+        s = self.settings()
+        if s['pack'] == 'us-me-cmp' and not bill.get('segments_json'):
+            return None
+        pack = self.tariffs.get(s['pack'])
+        plan = tariff.selected_plan(pricing_pack(s, pack), s['plan'])
+        choices = [plan] + [item for item in pack['supply'] if item['id'] == s['supply'] and plan['kind'] != 'bundled']
+        if any(bill['start'] < item['effective'] or (item.get('expires') and bill['end'] > item['expires']) for item in choices):
+            return None
+        tou = self.plan(s)['tou']
+        if tou and (bill.get('on_peak_kwh') is None or len(tou.get('periods', [])) > 1):
+            return None
+        months = bill_months(date.fromisoformat(bill['start']), date.fromisoformat(bill['end']))
+        try:
+            total = self.estimate(bill['kwh'], bill.get('on_peak_kwh'), months=months,
+                                  days=(date.fromisoformat(bill['end']) - date.fromisoformat(bill['start'])).days)['total']
+        except BillingError:
+            if tou:
+                return None
+            raise
+        return {'model_total': total, 'diff': round(bill['amount'] - total, 2)}
 
     def _seasonal_factor(self, rows: list[dict], today: date, end: date) -> float | None:
         daily = self._meter_days(rows)
@@ -634,6 +652,25 @@ class Billing:
             n += 1
         return (on / total if total else None), n
 
+    @staticmethod
+    def _scaled_profile(rows, kwh):
+        total = sum(row['kwh'] for row in rows)
+        if total <= 0:
+            return [] if kwh == 0 else None
+        return [{'ts': row['ts'], 'kwh': row['kwh'] * kwh / total} for row in rows]
+
+    def _recent_hourly(self, today):
+        rows = []
+        tz = local_tz()
+        for offset in range(1, 8):
+            day = today - timedelta(days=offset)
+            body = self.history.get('day', day.isoformat())
+            start = datetime.combine(day, datetime.min.time(), tz).timestamp()
+            for hour, kwh in enumerate(body.get('kwh') or []):
+                if kwh is not None:
+                    rows.append({'ts': int(start + hour * 3600), 'kwh': max(0, kwh)})
+        return rows
+
     def cycle(self) -> dict:
         if self.history is None:
             raise BillingError("history is not configured")
@@ -656,30 +693,34 @@ class Billing:
         projected = so_far + per_day * len(missing) + per_day * max(0.0, days - elapsed) * (seasonal if seasonal is not None else 1.0)
         projection_basis = "last year's meter data" if seasonal is not None else "last 7 days"
 
-        tou_plan = PLANS["cmp-a-tou"]["tou"]
-        share, share_days = self._on_peak_share(tou_plan, today)
+        tou_plan = next((self.plan(s, pid)['tou'] for pid in self.plan_ids(s) if self.plan(s, pid)['tou']), None)
+        share, share_days = self._on_peak_share(tou_plan, today) if tou_plan else (None, 0)
         factor = self.calibration() if s["calibrate"] else None
+        recent_profile = self._recent_hourly(today) if tou_plan else []
 
         def bill(kwh, plan_id=None):
-            p = plan_for(s, plan_id)
+            p = self.plan(s, plan_id)
             on = kwh * share if p["tou"] and share is not None else None
             if p["tou"] and on is None:
                 return None
-            b = estimate(s, kwh, on, plan_id)
+            hourly = self._scaled_profile(recent_profile, kwh) if p['tou'] else None
+            if p['tou'] and hourly is None:
+                return None
+            b = self.estimate(kwh, on, plan_id, hourly=hourly, days=days)
             if factor:
                 b["calibrated_total"] = round(b["total"] * factor, 2)
             return b
 
         current = bill(projected)
-        self._last = {"kwh": projected, "share": share}      # rates() prices live usage at this bill's position
+        self._last = {"kwh": projected, "share": share, "profile": recent_profile}      # rates() prices live usage at this bill's position
         compare = []
         annual = self._plans_12mo(meter, today)
         basis = "12 months of meter data" if annual else "last 7 days"
-        for pid in ("cmp-a", "cmp-a-tou", "cmp-et"):
+        for pid in self.plan_ids(s):
             b = {"total": annual["totals"][pid]} if annual else bill(projected, pid)
             reference = annual["totals"][s["plan"]] if annual else current["total"] if current else None
             if b is not None:
-                compare.append({"plan": pid, "label": PLANS[pid]["label"], "total": b["total"],
+                compare.append({"plan": pid, "label": self.plan(s, pid)["label"], "total": b["total"],
                                 "delta": round(b["total"] - reference, 2) if reference is not None else None, "basis": basis})
         return {
             "start": start.isoformat(), "end": end.isoformat(), "days": days, "elapsed_days": round(elapsed, 2),
@@ -694,17 +735,25 @@ class Billing:
             "on_peak_share": round(share, 3) if share is not None else None, "on_peak_days": share_days,
             "calibration": factor,
             "sense_cost_so_far": round(sense_cents / 100, 2) if sense_cents else None,
-            "plan": plan_for(s), "supply": {**SUPPLY, "per_kwh": s["supply_per_kwh"], "label": s["supplier"]},
+            "plan": self.plan(s), "supply": self.supply_info(),
         }
 
     def rates(self) -> dict:
         """What one more kWh costs at this cycle's projected usage (from the last cycle() call; 1,000 kWh
         until there is one), and the fixed charge per day, for live cost readouts."""
         s = self.settings()
-        p = plan_for(s)
+        p = self.plan(s)
         last = getattr(self, "_last", None) or {"kwh": 1000.0, "share": None}
         share = last["share"] if last["share"] is not None else 0.15
-        e = estimate(s, last["kwh"], last["kwh"] * share if p["tou"] else None)
+        hourly = None
+        if p['tou'] and s['pack'] != 'us-me-cmp':
+            rows = last.get('profile')
+            if not rows or sum(r['kwh'] for r in rows) <= 0:
+                now = datetime.fromtimestamp(self.clock(), local_tz())
+                start = datetime.combine(now.date() - timedelta(days=7), datetime.min.time(), local_tz()).timestamp()
+                rows = [{'ts': int(start + h * 3600), 'kwh': 1.0} for h in range(7 * 24)]
+            hourly = self._scaled_profile(rows, last['kwh'])
+        e = self.estimate(last["kwh"], last["kwh"] * share if p["tou"] else None, hourly=hourly)
         out = {"marginal_cents_per_kwh": e["marginal_cents_per_kwh"], "fixed_per_day": round(p["fixed"] / 30.44, 3),
                "plan": p["id"], "plan_label": p["label"], "at_kwh": round(last["kwh"], 1)}
         if p["tou"]:
@@ -720,6 +769,19 @@ class Billing:
             return kwh * r["marginal_cents_per_kwh"] / 100, r
         weights = [(h, w) for h, w in enumerate(hourly_w or []) if w]
         total = sum(w for _, w in weights)
+        settings = self.settings()
+        if settings['pack'] != 'us-me-cmp':
+            last = getattr(self, '_last', None) or {'kwh': 1000.0}
+            rows = last.get('profile')
+            tz = local_tz()
+            start = int(datetime.combine(day, datetime.min.time(), tz).timestamp())
+            if not rows or sum(r['kwh'] for r in rows) <= 0:
+                rows = [{'ts': start - 7 * 86400 + h * 3600, 'kwh': 1.0} for h in range(168)]
+            baseline = self._scaled_profile(rows, last['kwh'])
+            increment = [{'ts': start + h * 3600, 'kwh': w / total} for h, w in weights] if total else [{'ts': start, 'kwh': 1.0}]
+            marginal = tariff.estimate(self._pricing_pack(settings), settings['plan'], settings['supply'], last['kwh'],
+                                       hourly=baseline, marginal_hourly=increment)['marginal_cents_per_kwh']
+            return kwh * marginal / 100, r
         on = sum(w for h, w in weights if is_on_peak(datetime(day.year, day.month, day.day, h), r["tou"])) / total if total else 0.0
         return kwh * (on * r["marginal_on_cents"] + (1 - on) * r["marginal_off_cents"]) / 100, r
 

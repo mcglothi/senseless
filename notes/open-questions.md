@@ -43,3 +43,13 @@ still depends on Sense's servers. Long-term questions:
 - [ ] Event timeline from deltas (not Sense's laggy timeline).
 - [ ] Per-leg view, cost per load, "what just turned on?" notifications.
 - [ ] Prometheus exporter / Grafana / Home Assistant outputs from the local DB.
+
+
+## Energy providers
+
+- [x] Provider backend: generic interval store/importer registry, saved CSV mappings, data-only tariff
+      packs/engine, normalized CMP bills, migrations and HTTP routes (2026-10-16, synthetic tests).
+- [ ] Verify Smart Meter Texas and PG&E-style Green Button CSV profiles against real exports privately;
+      never commit raw household data. Both profiles are currently marked unverified.
+- [ ] Supply utility-specific holiday calendars if TOU comparisons need holiday exclusions beyond
+      explicit profile flags; CMP retains its prior holiday approximation.

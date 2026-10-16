@@ -1,7 +1,10 @@
 # Utilities, tariffs and imports: a provider layout (spec)
 
-Status: planned for 0.10.0. Replaces the CMP-only import (billing-import-spec.md) before it ships, so
-Senseless works for any utility, not just Central Maine Power.
+Status: backend implemented for 0.10.0 (2026-10-16); UI integration is separate. Replaces the CMP-only
+implementation described in billing-import-spec.md. Synthetic tests cover the provider layout;
+Smart Meter Texas and Green Button CSV remain unverified against real exports.
+
+Implementation/contribution notes: [energy-providers.md](energy-providers.md).
 
 ## Three layers
 

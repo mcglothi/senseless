@@ -1,6 +1,10 @@
 # Billing import: CMP bills + hourly meter data (spec)
 
-Status: planned for 0.10.0. Builds on senseless/billing.py (read it first).
+Status: CMP import implemented; provider backend supersedes the storage/pricing layout for 0.10.0
+(2026-10-16). This document records the original CMP contract. See
+[energy-providers-spec.md](energy-providers-spec.md) for the current contract and
+[energy-providers.md](energy-providers.md) for migration/compatibility details. `meter_hourly` is migrated
+to `usage_interval`; pricing comes from the CMP JSON pack. Upload response kinds stay compatible.
 
 ## Why
 A real CMP account gives (a) bill PDFs with every line item and (b) a "Download My Data" CSV of hourly

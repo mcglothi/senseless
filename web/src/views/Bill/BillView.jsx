@@ -4,6 +4,8 @@ import { toast } from '../../ui/primitives'
 import { api } from '../../api/api'
 import { fmtInt } from '../../ui/format'
 import { breakdown, cycleBars, touAdvice, usd } from '../../ui/billing'
+import { BillImport } from './BillImport'
+import { BillInsights } from './BillInsights'
 
 // Bill: this billing cycle priced the way the utility bills it (fixed charge, delivery, supply, tax),
 // projected to the end of the cycle, compared across rate plans, and checked against bills you enter.
@@ -11,13 +13,13 @@ import { breakdown, cycleBars, touAdvice, usd } from '../../ui/billing'
 const PART_COLOR = { fixed: () => C.muted, delivery: () => C.l1, supply: () => C.accent, tax: () => C.orange }
 
 function useBilling() {
-  const [state, setState] = useState({ config: null, cycle: null, bills: [], error: null, loading: true })
+  const [state, setState] = useState({ config: null, cycle: null, bills: [], insights: null, error: null, loading: true })
   const load = useCallback(async () => {
     try {
       const [config, bills] = await Promise.all([api('GET', '/api/billing'), api('GET', '/api/billing/bills')])
       setState(s => ({ ...s, config, bills, loading: false }))
-      const cycle = await api('GET', '/api/billing/cycle')
-      setState(s => ({ ...s, cycle, error: null }))
+      const [cycle, insights] = await Promise.all([api('GET', '/api/billing/cycle'), api('GET', '/api/billing/insights').catch(() => null)])
+      setState(s => ({ ...s, cycle, insights, error: null }))
     } catch (e) {
       setState(s => ({ ...s, error: e.message, loading: false }))
     }
@@ -113,6 +115,13 @@ export function BillView() {
           {tou && <p style={{ color: C.body, fontSize: 14, lineHeight: 1.5 }}>{tou.text} Measured over the last {c.on_peak_days} days; switching may need a meter exchange, and supply is priced the same either way.</p>}
         </section>
       )}
+
+      <BillInsights insights={b.insights} currentPlan={b.config?.settings.plan} labelOf={id => b.config?.plans[id]?.label ?? id} />
+
+      <section style={card} aria-label="Import bills and usage">
+        <div style={kicker}>Import</div>
+        <BillImport onImported={b.reload} />
+      </section>
 
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'minmax(0, 1fr) minmax(0, 1fr)', gap: sp(14) }}>
         <Bills b={b} />

@@ -118,12 +118,13 @@ def test_csv_dst_overlap_and_privacy(tmp_path, caplog):
             ('2025-11-02 01:00:00-05:00', 3, 32), ('2025-11-02 02:00:00-05:00', 4, 33)]
     result = b.import_data(b'\xef\xbb\xbf' + csv_bytes(rows))
     assert result == {'kind': 'meter-csv', 'added': 4, 'updated': 0,
+                      'importer': 'csv-generic', 'label': 'Avangrid / CMP usage CSV',
                       'from': int(datetime.fromisoformat(rows[0][0]).timestamp()),
                       'to': int(datetime.fromisoformat(rows[-1][0]).timestamp())}
     stored = b._meter_rows()
     assert [r['ts'] for r in stored] == list(range(result['from'], result['to'] + 1, 3600))
     assert stored[1]['temp_f'] is None
-    assert stored[2]['delivered'] == 3 and stored[2]['received'] == 0
+    assert stored[2]['kwh'] == 3 and stored[2]['received'] == 0
     repeat = b.import_data(csv_bytes([rows[2], ('2025-11-02 02:00:00-05:00', 8, 35)]))
     assert (repeat['added'], repeat['updated']) == (0, 2)
     assert b._meter_rows()[-1]['kwh'] == 8
@@ -169,7 +170,7 @@ def test_bill_parser_and_own_rate_check(tmp_path, text, total, kwh, segments, ca
     assert len(parts) == segments
     b = billing(tmp_path)
     result = b.import_data(pdf_bytes(text))
-    assert result['kind'] == 'bill-pdf' and result['source'] == 'bill-pdf'
+    assert result['kind'] == 'bill-pdf' and result['source'] == 'bill-cmp'
     assert result['amount'] != 999.99
     assert result['start'] == ('2026-08-28' if segments == 1 else '2026-06-26')
     assert result['end'] == ('2026-09-29' if segments == 1 else '2026-07-29')
@@ -250,8 +251,8 @@ def put_hours(b, start, end, usage=lambda dt: 1.0, temp=lambda dt: 35.0):
     begin = int(datetime.combine(start, datetime.min.time(), TZ).timestamp())
     stop = int(datetime.combine(end, datetime.min.time(), TZ).timestamp())
     with b._conn() as db:
-        db.executemany('INSERT OR REPLACE INTO meter_hourly VALUES (?,?,?,?,?)',
-                       ((ts, usage(datetime.fromtimestamp(ts, TZ)), temp(datetime.fromtimestamp(ts, TZ)), None, None)
+        db.executemany('INSERT OR REPLACE INTO usage_interval VALUES (?,?,?,?,?,?)',
+                       ((ts, 3600, usage(datetime.fromtimestamp(ts, TZ)), temp(datetime.fromtimestamp(ts, TZ)), None, 'synthetic')
                         for ts in range(begin, stop, 3600)))
 
 
@@ -270,7 +271,7 @@ def test_insights_intersection_weather_and_today(tmp_path):
     assert h.calls == [('month', '2026-10-01')]
     # Incomplete meter days cannot stand in for a full day's usage.
     with b._conn() as db:
-        db.execute('DELETE FROM meter_hourly WHERE ts=(SELECT min(ts) FROM meter_hourly)')
+        db.execute('DELETE FROM usage_interval WHERE ts=(SELECT min(ts) FROM usage_interval)')
     assert b.insights()['sense_vs_meter']['days'] == 13
 
 
@@ -304,7 +305,7 @@ def test_year_plans_math_and_cycle_switch(tmp_path):
         assert month['on_peak_share'] == pytest.approx(on / month['kwh'], abs=1e-5)
         for pid in month['totals']:
             assert month['totals'][pid] == estimate(b.settings(), month['kwh'], on, pid)['total']
-    assert set(year['totals']) == {'cmp-a', 'cmp-a-tou', 'cmp-et'}
+    assert set(year['totals']) == {'rate-a', 'a-tou', 'electric-technology'}
     assert year['totals'] == {pid: round(sum(m['totals'][pid] for m in year['months']), 2) for pid in year['totals']}
     b.update({'plan': 'custom', 'custom': {'fixed': 30, 'delivery': .1}, 'supply_per_kwh': .2})
     updated = b.insights()['plans_12mo']
@@ -336,7 +337,7 @@ def test_seasonal_projection_and_missing_window(tmp_path, ratio, expected):
     # Sense lacks October 3, so one missing day is filled at the unadjusted recent rate.
     assert out['kwh_projected'] == pytest.approx(15 * 48 + 48 + 48 * 15.5 * expected, abs=.1)
     with b._conn() as db:
-        db.execute('DELETE FROM meter_hourly WHERE ts=(SELECT min(ts) FROM meter_hourly)')
+        db.execute('DELETE FROM usage_interval WHERE ts=(SELECT min(ts) FROM usage_interval)')
     fallback = b.cycle()
     assert fallback['projection_basis'] == 'last 7 days' and fallback['kwh_projected'] == baseline
 
@@ -425,6 +426,8 @@ def test_import_routes_and_guards_without_sockets(tmp_path, caplog):
         b.history.get.side_effect = HistoryError('private upstream failure')
         put_hours(b, date(2025, 1, 1), date(2025, 1, 2))
         result = await request('GET', '/api/billing/insights')
+        assert result.status == 502 and 'private upstream failure' not in result.text
+        result = await request('GET', '/api/billing/cycle')
         assert result.status == 502 and 'private upstream failure' not in result.text
     asyncio.run(run())
 
