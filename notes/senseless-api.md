@@ -64,15 +64,26 @@ These routes return 404 when detection is not running.
 | POST | `/api/cycle-patterns/{id}/ignore` | Integer cycle pattern ID; JSON `{ "ignored": true }` | Updated stored row. Boolean required; omitted defaults to true. |
 
 Stored pattern fields are `id`, `legs`, `stages`, `center_w`, `n`, `name`, `ignored`,
-`created`, `named_at`, `last_seen`. Load responses also include `runs_window`,
+`created`, `named_at`, `last_seen`, `inrush_w`. Pattern `inrush_w` is the median
+reported startup size among surge-adjusted runs in the current window, or null
+when none qualify. `center_w` clusters their settled running sizes.
+Load responses also include `runs_window`,
 `runs_today`, `wh_today`, `wh_window`, `last_ts`, `running`, `example`,
 `median_duration_s`, `closed_runs`, `sense_hint`, `cycle_runs`, `part_of_cycles`.
 `part_of_cycles` is true when at least 70% of the pattern's window runs are cycle
 members. All rows remain available and nameable; an inbox client can hide flagged
 fragments and offer an expanded view. The frontend has not yet adopted this flag.
 Run fields are `generation`, `start_frame`, `start_ts`, `end_frame`, `end_ts`,
-`legs`, `w`, `off_w`, `stages`, `duration_s`, `running`, `status`, `wh`, `pattern`,
-`cycle` (cycle ID string or null).
+`legs`, `w`, `inrush_w`, `off_w`, `stages`, `duration_s`, `running`, `status`, `wh`, `pattern`,
+`cycle` (cycle ID string or null), `closed_by`.
+Run `closed_by` is `"shared-off"` when two runs switched off together at one
+observed off; otherwise null. Both runs retain that off's full `off_w`; do not
+sum those values as separate measured offs. Each run's `wh` uses its own size
+and duration.
+Run `inrush_w` is the monitor's reported on-size when covered pre/settled readings
+identify a startup surge; otherwise null. `w`, pairing and `wh` then use the
+settled rise. `stages` retain the original reported watts. See
+[settled sizing rules and limits](detection.md#steps-to-runs).
 Invalid pattern IDs return 400; unknown IDs return 404.
 
 Cycle fields: `id` (`generation:legs:start_frame`, stable while the burst start

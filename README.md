@@ -17,7 +17,7 @@ See live whole-home and per-leg power, voltage, today's energy and cost, and the
 
 ### Loads / Inbox
 
-The local detector pairs on/off steps into runs and groups recurring patterns by leg, power, and startup stages. The inbox offers fingerprints and name ideas. Name a pattern once and future matches carry that name. Patterns with the same name share a card, with run counts and estimated energy.
+The local detector pairs on/off steps into runs and groups recurring patterns by leg, power, and startup stages. Motors are sized by the power they settle at, not their start-up surge, so pumps and compressors get real runtimes, and one timer switching several loads off at once closes them all. The inbox offers fingerprints and name ideas. Name a pattern once and future matches carry that name. Patterns with the same name share a card, with run counts and estimated energy.
 
 When runs line up with Sense's own device turn-ons, **Sense naming hints** offer a one-tap suggestion. These are correlations for you to confirm, not verified labels. Detection recomputes every minute over the last 48 hours. It uses rules, not a trained AI model; the stored data is there for your own experiments.
 
@@ -237,8 +237,6 @@ Metrics include feed health and age, total and per-leg watts, voltage, frequency
 - [Open questions](notes/open-questions.md) and [changelog](CHANGELOG.md): remaining work and shipped features.
 
 ## Roadmap
-
-In progress: **motor loads.** Pumps and compressors draw a start-up surge, so their switch-on looks bigger than their switch-off and the two never pair. Sizing a run by the power it settles at, and letting one switch-off close two loads on the same timer (a pool pump and its salt cell), turns them into real runs with runtime and cost.
 
 Next, roughly in order:
 

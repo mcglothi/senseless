@@ -73,6 +73,17 @@ def test_dishwasher_heater_is_part_of_program(tmp_path):
     assert len(found) == 1 and found[0].has_heat
 
 
+def test_shared_off_fragments_preserve_program_envelope(tmp_path):
+    ds, rs = program()
+    found, runs, patterns = run_pipeline(tmp_path, ds, rs)
+    baseline, = found
+    for r in runs:
+        r.end_frame, r.end_ts = r.start_frame + 600, r.start_ts + 10
+        r.status, r.closed_by = "closed", "shared-off"
+    shared, = cycles.detect_cycles(ds, runs, patterns.all(), rs, 3100)
+    assert shared.as_dict() == baseline.as_dict()
+
+
 @pytest.mark.parametrize("case", ["flat", "wrong_leg", "no_baseline", "sparse", "null", "nan", "other_generation", "no_readings"])
 def test_power_must_confirm_with_covered_baseline_and_correct_leg(tmp_path, case):
     ds, rs = program()
@@ -120,11 +131,13 @@ def test_clean_switching_appliance_is_not_a_cycle(tmp_path):
 def test_clean_closures_cannot_bridge_separate_programs(tmp_path):
     ds, _ = program()
     ds = [d for d in ds if 600 <= d["ts"] <= 1200 or 1800 <= d["ts"] <= 2400]
-    ds += [delta(605 + i * 100 + offset, w)
+    # Keep clean startups' pre/settled windows clear of the program's unreported
+    # power boundaries, so settled sizing doesn't infer a smaller on at 1205.
+    ds += [delta(630 + i * 100 + offset, w)
            for i in range(18) for offset, w in ((0, 1500), (40, -1500))]
     rs = [dict(generation=0, frame=t * 60, ts=t, l2_w=0,
                l1_w=100 + 600 * (600 <= t <= 1200 or 1800 <= t <= 2400)
-               + 1500 * (605 <= t < 2345 and (t - 605) % 100 < 40))
+               + 1500 * (630 <= t < 2370 and (t - 630) % 100 < 40))
           for t in range(420, 2501)]
     found, runs, _ = run_pipeline(tmp_path, ds, rs)
     clean = [r for r in runs if r.w == 1500]

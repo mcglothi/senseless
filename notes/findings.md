@@ -153,3 +153,252 @@ From 5 minutes of feed in one house:
   runs in a pattern. Removing all individual closures splits this wash, whose
   mixed program patterns include incidental pairings across a pause. Membership
   nevertheless uses only unclosed supporting candidates. See [cycles.md](cycles.md).
+
+## 2026-10-16: Bounded shared-off pairing replay (round 2)
+
+- **Verified against the same local scratch traffic through `Detector` and
+  temporary SQLite databases:** 5,655 deltas over 02:33:39–14:33:08 and
+  45,462 readings over 08:03:02–14:33:08. Compared `SHARED_OFF_CAP=0` with
+  12, preserving settled-level sizing. No captures or account identifiers were
+  added to the repository. Appliance labels below are supplied by the operator.
+- **The requested pool recovery is falsified on these captures.** The −1,054.2 W
+  off at 14:28:10 already closes a power-supported **1,078.5 W** single started
+  at **13:05:12**, both with shared offs enabled and disabled. The mandated
+  single-match priority prevents pair fallback at this off.
+- Independently, the salt start is merged from +61.1 W at **08:31:53** and
+  +475.7 W two seconds later. Its settled window has no coverage: the recordings
+  stop at 08:31:59 and resume at 08:33:16. Existing sizing therefore correctly
+  retains **536.9 W**, not the operator's roughly 280 W estimate. That run closes
+  singly at **13:05:23** (−556.1 W), long before the timer off. A 901.1 + 536.9 W
+  pair would not satisfy the unchanged summed-size tolerance anyway.
+- The **901.1 W** pool start at **08:31:00** remains unresolved and expires
+  from public runs after six hours. At the timer off it is **299th newest**
+  among **305** indexed open L2 starts, outside the fallback's 12-run cap.
+  Its hypothetical duration to 14:28:10 is 21,429.5 s, or **5,364.0 Wh**;
+  that is a labeled expectation, **not recovered runtime/energy**. Recovering
+  this example needs a separately validated refinement to sizing, competing
+  single matches and candidate retrieval; compound offs alone do not establish it.
+- Raw pairing produces **44 shared-off run closures at 22 off events**.
+  Duration-outlier rejection removes one closure and clears its provenance;
+  `Detector` exposes **43 surviving shared-off runs at 22 events**. Public run
+  count changes **1,696 → 1,704**; disabling the fallback yields zero shared
+  closures and restores the baseline. Each shared run exposes
+  `closed_by="shared-off"` and keeps the full observed off watts.
+- **Spot checks, not appliance identifications:** L1 starts at 14:31:12 and
+  14:31:15 (37.9 + 91.7 = 129.6 W) close at 14:31:28 (−129.4 W); covered
+  pre/post leg means fall 126.8 W, a plausible shared switch. L2 11:05:39 and
+  11:06:57 (133.8 + 1,146.3 = 1,280.1 W) close at 11:07:25 (−1,463.4 W),
+  within 192.0 W tolerance; covered means fall 1,234.3 W. Two small L1 pairs
+  closing at 08:44:59 and 08:45:19 also fit step sizes, but covered pre/post
+  means rise 8.6 and 25.4 W amid program chatter. Those are questionable
+  attributions: absolute power floors cannot establish load identity against
+  a changing background. Earlier overnight matches lack reading coverage.
+- The probable **well pump is unchanged:** both legs, **793.1 W**,
+  **13:13:12–13:15:33**, **140.5 s**, **30.95 Wh**. All **22 dryer-element
+  runs** retain sizes, ends, statuses, durations and energy, **2,840.49 Wh**
+  total. Fresh settings databases can allocate different numeric pattern IDs
+  when additional old starts are recovered.
+- Shared closure is weaker evidence of an individually repeatable load in
+  cycle detection. Excluding shared closures from clean-closure/chatter tests
+  preserves the washer's ID, **08:19:38–09:06:00** envelope, peak, duration
+  and **219.18 Wh**. Fingerprint/membership metadata is not identical: candidates
+  **115 → 116**, step rate **2.4802 → 2.5018/min**, median candidate size
+  **441.81 → 441.50 W**, and supporting members **108 → 109**. Without this
+  safeguard the end shifts 16 s earlier and energy drops to 216.38 Wh. No new
+  L2/both program envelopes appear.
+- **Validation:** 18 synthetic shared-off cases plus a cycle-envelope regression;
+  focused shared-off/cycle suites **52 passed**. Disabling the fallback makes
+  all **7 selected positive shared-off regressions fail**. Full requested
+  `uv sync -q && .venv/bin/python -m pytest -q` (with a writable temporary uv
+  cache) yields **526 passed, 12 failed**, all failures from sandbox-denied
+  socket binds, matching the preceding round's environment limitation. Failed
+  tests are `test_api.py::{test_stream_delivers_snapshot_then_events,
+  test_shutdown_is_prompt_with_an_open_stream,test_series_and_deltas_accept_windows,
+  test_circuits_api}`, `test_billing.py::{test_billing_api,
+  test_today_cost_uses_the_tariff}`, `test_detect.py::test_loads_api_name_and_ignore`,
+  `test_floorplans.py::{test_http_api,test_http_write_security_and_upload_limits}`,
+  `test_history.py::test_history_endpoint`, and
+  `test_hunt.py::{test_hunt_api_long_poll_and_label_to_room,
+  test_stream_snapshot_carries_hunt}`.
+- **Benchmark:** supplied `scratchpad/perf/bench.py`, **333,832 readings /
+  22,864 deltas**, **1.17 / 1.19 / 1.19 s**, maximum RSS approximately
+  **108 MB**. Each unmatched off examines at most 66 pairs; the ordered index
+  avoids scans through thousands of unresolved or previously closed starts.
+
+## 2026-10-16: Settled-level inrush sizing replay
+
+- **Verified against local scratch traffic by replay through `Detector` and a
+  temporary SQLite database:** 5,655 deltas and 45,462 readings, ending 14:33:08
+  local time. No raw data or account identifiers were copied into this repository.
+  The appliance labels below come from the task's examples; the well-pump identity
+  remains probable, not established by the detector.
+- The 13:13:12 both-leg start changes from 1,706.7 W, unresolved, zero known
+  runtime/energy to **793.1 W**, closed at 13:15:33, **140.5 s and 30.95 Wh**.
+  Its reported 1,706.7 W is retained as `inrush_w`. The overlap rule uses exact
+  `L1`/`L2`/`both` categories, like run pairing; a single-leg step is not a `both`
+  step for that guard.
+- The 08:31:00 L2 pool start changes from 2,230.3 W to **901.1 W**, with
+  `inrush_w=2230.3`. The requested windows give 919.8 W before and 1,820.9 W
+  settled. It **still does not close** against the approximately −1,054 W off
+  at 14:28:10: the mismatch is about 153 W versus a 135 W tolerance. In both
+  replays the unresolved start has expired out of public runs at 14:33; retained
+  cycle evidence exposes it for diagnosis. Thus the rule alone does not recover
+  the example's expected roughly 6 kWh. Pairing tolerance was not widened.
+- The earlier 08:30:25 merged L2 start (1,271.2 W including its small first
+  stage) adjusts to 93.9 W and pairs with a later small off. That is an example
+  of the heuristic's weakness: background changes can create an apparent rise
+  without establishing that a device really ran. The salt-cell candidate remains
+  536.9 W with no inrush and its prior 13:05:23 closure; this is not a verified
+  appliance attribution either.
+- Public run count is **1,696 before and after**; **10** public runs adjust,
+  or **12** starts when expired unresolved cycle evidence is included. All
+  **22** both-leg dryer-element runs (5.6–6.0 kW; 21 closed, one already
+  unresolved) retain sizes, ends, statuses, duration and energy: 2,840.49 Wh
+  total. Their `inrush_w` values remain null.
+- The washer still forms one L1 envelope, **08:19:38–09:06:00, 219.18 Wh**,
+  with the same ID, peak and duration. It is not completely unchanged: one
+  newly pairable fragment reduces candidates **116 → 115**, supporting
+  unclosed members **109 → 108**, step rate **2.5018 → 2.4802/min**, and
+  median candidate size **442.29 → 441.81 W**. No L2/both cycles appear.
+- **Synthetic validation:** motor surges on either leg and 240 V, clean
+  resistive loads, staged startup, overlap/coverage boundaries, missing/nonfinite
+  data, generation isolation, SQL/raw parity, pattern medians and old settings
+  migration. Disabling settled sizing makes **12 of 29** new regressions fail.
+  The full suite has **507 passes** and **12 sandbox socket-bind failures**
+  (`PermissionError` at `127.0.0.1` bind), with no other failures. The clean
+  cycle-bridge fixture now starts its independent load away from unreported
+  program power boundaries, preserving that fixture's clean-start assumption.
+- **Benchmark:** the supplied `scratchpad/perf/bench.py`, eight replay copies,
+  **333,832 readings / 22,864 deltas** over the 48-hour detection window.
+  Before: **1.16 / 1.15 / 1.14 s** per recompute. After:
+  **1.16 / 1.15 / 1.18 s** (median **1.16 s**). Targeted one-second SQL means
+  preserve the existing five-second cycle-energy bins; memory was approximately
+  111 MB maximum RSS. These timings are local measurements, not a performance
+  guarantee on other hosts.
+
+## 2026-10-16: Baseline-relative evidence replay (round 3)
+
+- **Verified by replay of the same scratch traffic through `Detector`:**
+  5,655 deltas, 45,462 readings, ending 14:33:08 local. Baseline evidence now
+  uses the covered one-second mean over first-stage −12 s to −2 s for every
+  on, including small/overlapped starts ineligible for surge sizing. Reject a
+  sustained five-second maximum below `pre + 0.85*w - 300 W`; fall back to
+  the previous absolute floor without a covered baseline. Single and shared
+  matches use this rule. Combined overlap checks use the older baseline once.
+  Surge-sized singles allow 20% off mismatch (plain runs retain 15%); shared
+  sums retain 15%, and their starts must be within 600 frame-derived seconds.
+- **Pool pump recovered:** the 08:31:00 L2 start, **901.1 W** with
+  `inrush_w=2230.3`, closes **singly at 14:28:10** against −1054.2 W.
+  Duration **21,429.5 s (5 h 57 m 9.5 s)**; energy **5364.02 Wh**. These
+  captures' specified pre-window averages **919.8 W**, rather than the rough
+  983 W estimate; required floor **1385.7 W**, observed sustained minimum
+  **1821.2 W** before the candidate off. No contradiction occurs.
+- The competing **13:05:12 L2 1078.5 W** start becomes **unresolved**, with
+  no invented end and zero known runtime/energy. Its pre is **2116.0 W**,
+  required floor **2732.8 W**, versus a sustained minimum **2088.5 W**.
+  The partial offs are not combined. The putative salt start at 08:31:53
+  (merged with 08:31:55, still 536.9 W because settled coverage is missing)
+  also becomes unresolved and expires from public runs; its old 13:05:23
+  closure is rejected. Appliance labels remain operator-supplied identities.
+- **Well pump unchanged from round 2:** both-leg 13:13:12–13:15:33,
+  **793.1 W, 140.5 s, 30.95 Wh**, −765.2 W off. All **22** dryer-element
+  runs retain their wattage, end, status, duration and energy versus both main
+  and round 2: **2840.49 Wh** total, 21 closed and one unresolved.
+- **Washer envelope/energy unchanged:** L1 **08:19:38–09:06:00**, same
+  cycle ID, peak and 2782 s duration, **219.18 Wh**. Fragment metadata does
+  change: candidates **116 → 117**, step rate **2.5018 → 2.5234/min**,
+  median size **441.50 → 441.18 W** versus round 2, supporting membership
+  **109 → 112**. No additional L2/both program envelopes appear.
+- **Shared offs decrease less than hoped:** raw pairing **44 → 38 closures**
+  at **22 → 19 off events**. One duration outlier loses its closure/provenance,
+  leaving **37 public shared-off runs at 19 events** (round 2: 43 at 22).
+  Most surviving pairs already start within ten minutes; nearby starts and
+  300 W slack still admit program chatter. Spot checks using covered means
+  over off −12..−2 s and +6..+20 s:
+  - L1 14:31:12 + 14:31:15, **129.6 W**, off 14:31:28 **−129.4 W**:
+    mean falls **126.8 W**, plausible shared switching.
+  - L2 11:05:39 + 11:06:57, **1280.1 W**, off 11:07:25 **−1463.4 W**:
+    mean falls **1234.3 W**, plausible within summed-size tolerance.
+  - L1 offs 08:44:59 and 08:45:19 remain questionable: pair sums
+    **130.8 / 143.4 W** match drops **−141.0 / −140.4 W**, but covered
+    means instead rise **8.6 / 25.4 W** amid washer chatter. These are weak
+    associations, not confirmed individual appliances.
+- **Versus main (`c436a3d`), matching existing public starts by generation,
+  frame and legs:** **153** change status/end: 75 closed → unresolved,
+  44 unresolved → closed, 27 closed with a different end, four running →
+  closed, three running → unresolved. Another run changes provenance only
+  (11:06:57 L2, same 11:07:25 end), making **154** if provenance counts.
+  Ten starts newly remain public, including the pump, while nine formerly
+  closed starts become unresolved and expire; total **1696 → 1697**.
+  Versus round 2, 133 common public starts change status/end (1704 → 1697).
+  Notable changes besides the pumps/salt: both-leg 09:00:15 becomes a
+  **717.3 W** run closed 09:06:24; L2 **2604.4 W** at 13:20:25 and
+  **433.9 W** at 13:27:59 lose questionable later closures; L1 small shared
+  runs at 14:31:12/15 now close 14:31:28. Full comparison JSON and scripts
+  remain in the external `scratchpad/inrush/` directory; no raw capture or
+  account identifiers were added to the repo.
+- **Validation:** 33 added synthetic cases cover relative floors, exact
+  threshold/coverage boundaries, each leg category, absolute fallback, SQL/raw
+  parity for small/overlapped starts, baseline double-counting, surge-only
+  20% boundaries and the 600 s frame boundary. Mutation falsification produces
+  **9 failures** when relative evidence is disabled, **3 failures** when surge
+  tolerance returns to 15%, and **1 failure** when the start-gap gate is
+  removed. Focused detector/cycle suites: **214 passed**. Requested full
+  `uv sync -q && .venv/bin/python -m pytest -q` (temporary writable uv cache):
+  **559 passed, 12 failed**, the same sandbox-denied localhost socket binds
+  as before, with no other failures. AIKB instruction readiness validation
+  passes when run from the AIKB root.
+- **48 h benchmark:** supplied `scratchpad/perf/bench.py`, **333,832 readings /
+  22,864 deltas**, recompute **1.07 / 1.10 / 1.10 s**, maximum RSS **132 MB**.
+  An initial 1.95–2.17 s version allocated a temporary dataclass for every
+  older-overlap check; passing combined watts directly removes that allocation
+  while preserving the same matching results. All final timings are below 2 s.
+
+## 2026-10-16: Inrush review follow-up — identities and power evidence
+
+- **Verified with synthetic migration and replay:** recover run-to-pattern
+  associations before assigning resized runs. Named and ignored patterns move
+  to their members' settled upper median while keeping their IDs and user state.
+  Legacy settings reconstruct associations from reported shapes against the old
+  centres; later recomputes save associations in settings.db. The regression has
+  an L2 2230 W Pool pump beside a named 1000 W Heater, including a resized pump
+  run that exactly matches Heater's wattage. Heater cannot absorb pump members.
+  Restart, history expiry and subsequent pump activations preserve identity.
+  The real traffic replay with those two seeded legacy patterns moves Pool pump
+  to **901.1 W**, keeping its original pattern ID. Production settings were not
+  modified; the scratch settings reproduce the user-supplied production shape.
+- **Power rule, verified synthetically:** baseline slack is now
+  `min(300 W, 0.30 * load_w)`, including summed overlap. Independently paired
+  background offs can lower the baseline only after their observed closure and
+  only for loads already present throughout the pre-window. Preserve the actual
+  leg split for both-leg offs. Earlier dips and later starts cannot be excused by
+  that adjustment; shared hypotheses cannot supply background corrections.
+- **Replay of the same 5,655 deltas / 45,462 readings:** pool pump remains
+  **08:31:00–14:28:10, 901.1 W, 21,429.5 s, 5364.02 Wh**. The **12:51:49
+  L2 +764.2 W** start still sizes to **287.3 W**, but is now **unresolved**:
+  its former 14:12:03 closure and **384.16 Wh** disappear. Public shared-off
+  runs drop **37 → 23**, at **19 → 12** events; raw pairing has 24 shared
+  runs before one duration outlier is rejected. Nine public runs are surge-sized.
+- **Conservative well-pump change:** both-leg **13:13:12 +1706.7 W** now
+  encounters the **13:13:24 L1 −124.9 W** event in its settled window. The
+  conductor-aware guard skips resizing, so this probable appliance remains
+  **unresolved at 1706.7 W**, rather than closing at 793.1 W against the
+  13:15:33 −765.2 W off. Runtime/energy are unknown and counted as zero.
+  Recovering it needs evidence beyond this contaminated window; the appliance
+  label remains inferred from the replay context.
+- **Dryer and washer:** all **22** dryer-element runs keep wattage, end, status,
+  duration and energy (**2840.49 Wh**, 21 closed). Washer remains L1
+  **08:19:38–09:06:00**, **2782 s, 219.18 Wh**, with the same cycle ID and
+  peak. Fragment metadata changes: 117 → 122 candidate steps and 112 → 119
+  supporting runs. These are inferred program fragments, not labeled appliances.
+- **Validation:** all **19** review cases pass. Reverting each fix independently
+  yields **5 / 5 / 3 / 4 failures** for identities, slack, confirmed background
+  closures and conductor overlap, then restoration passes. Focused detector
+  suites: **200 passed**. Requested `uv sync -q && .venv/bin/python -m pytest -q`
+  with a writable temporary uv cache: **579 passed, 12 failed**; every failure
+  is the existing sandbox denial of localhost socket binding. Instruction
+  readiness validation and `git diff --check` pass.
+- **Supplied 48-hour benchmark:** **333,832 readings / 22,864 deltas**,
+  **0.58 / 0.59 / 0.58 s**, 128 MB maximum RSS. Real replay recompute is
+  **0.20 s**. Replay JSON, seeded migration settings and mutation logs remain
+  outside the repo in scratch/temporary storage; no raw capture was added here.

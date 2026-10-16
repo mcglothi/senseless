@@ -24,15 +24,77 @@ case on hardware. The microwave observations are verified against captured traff
 
 ## Steps to runs
 
-Each positive step starts a run. Each negative step closes at most one open run:
+Each positive step starts a run. Each negative step first tries one open run:
 the most recent compatible on-step on exactly the same legs. The size test is
 `abs(on_w - abs(off_w)) <= max(0.15 * on_w, 20 W)`
-(`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). An unmatched off is discarded.
+(`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). Runs with `inrush_w` set instead allow
+`max(0.20 * on_w, 20 W)` because settled sizing is an estimate. A single compatible, power-supported
+run always wins over a pair.
 
-When readings are available, sustained power below the on-size minus that tolerance
-retires the on as `unresolved` before matching an off. A completed newer compatible
+If there is no single match, try pairs among the 12 most recent open runs on
+exactly those legs, each started within `MAX_RUN_S`, and whose starts are at most
+`SHARED_START_S = 600 s` apart (using frame counters). Compare the summed run
+watts to the off with the same `max(0.15 * sum_w, 20 W)` tolerance. Power must
+support each run throughout its own duration and their sum during their overlap,
+using the sustained-power evidence rules below. Prefer the smallest gap between
+start frames, then the smallest absolute watt error; remaining ties favor recent
+starts. Both runs end at that off and serialize `closed_by: "shared-off"`, meaning
+"switched off together"; otherwise `closed_by` is null. Each retains the full
+observed `off_w`, not an apportioned share. Energy uses each run's own watts and
+duration. Rejected duration outliers clear `closed_by` along with their end.
+
+The existing size buckets serve single matching; a separate ordered open index
+makes the pair fallback examine at most 66 pairs per off, without scanning all
+unresolved starts. `SHARED_OFF_CAP = 0` disables the fallback for falsification.
+An unmatched off is discarded. A long-running load outside the most recent 12
+cannot close through this fallback, even if an older pair could explain the off.
+This is a bounded heuristic, not proof of appliance identity. Shared closures
+remain weak individual-load evidence in cycle detection: they do not establish
+clean repeated closures or chatter, or remove program fragments from envelopes.
+
+Before pairing, an on-step of at least 300 W can be sized by its settled power
+rise instead of the monitor's reported startup surge:
+
+- Baseline: mean on the step's legs from 12 s to 2 s before its first stage.
+- Settled: mean from 6 s to 20 s after its last stage; for `both`, use L1 + L2.
+- Require at least 70% covered time in each window. A covered one-second bin
+  needs finite readings on the relevant legs; missing/invalid bins add no coverage.
+  Bin means are weighted by their overlap with the window, with no gap filling.
+- Skip when another step of absolute size at least 120 W occurs after the first
+  stage through 20 s after the last stage, inclusive at the far end, on a shared
+  conductor. A `both` event overlaps either leg; either single-leg event overlaps
+  `both`. L1-only and L2-only events remain independent. The candidate's own merged
+  stages are excluded.
+- If `30 W <= settled - baseline < 0.8 * reported_on_w`, set `run.w` to that rise
+  and `run.inrush_w` to the reported size. Otherwise retain the reported size and
+  leave `inrush_w` null. Preserve the reported `stages` in either case.
+
+Pairing, sustained-power checks, pattern clustering and estimated energy all use
+the adjusted `w`. Plain runs keep 15% pairing tolerance; surge-sized runs allow
+20%. The six-hour limit still applies.
+`Detector.recompute` loads one-second baseline means in SQL for every on, plus settled means for eligible starts,
+coalescing overlapping windows and using the `(generation, frame)` index. The
+five-second maxima used below and cycle energy bins remain unchanged. Raw-reading
+replays/tests compute the same one-second means in Python. Supplying only coarse
+five-second bins without startup means skips adjustment; delta-only databases and
+missing startup readings also retain the original size.
+
+When a covered pre-start mean is available (the same first-stage −12 s to −2 s
+window used for sizing), sustained power below
+`pre + 0.85 * run.w - min(300 W, 0.30 * run.w)` retires the on as `unresolved`
+before matching an off. The bounded allowance keeps small loads' floors above
+baseline. An independently paired background run that was fully started before
+the baseline window can lower that baseline after its observed off, capped at
+the baseline itself. Earlier evidence retains the original floor, and loads
+starting after the baseline cannot lower it. Both-leg offs retain their observed
+leg split for this accounting; shared-off hypotheses do not lower baselines.
+Without a covered baseline, retain the
+absolute `run.w - max(0.15 * run.w, 20 W)` floor, including for surge-sized runs.
+A completed newer compatible
 cycle also retires older candidates if power during their supposed overlap cannot
-support both loads. Evidence uses maxima in fully covered five-second bins, skips
+support both loads. Shared-off matching checks each run and their combined overlap;
+combined checks use the earlier start's baseline and the later start's interval,
+so the older load is counted once. Evidence uses maxima in fully covered five-second bins, skips
 startup/stages and off transitions, and stays within a frame-counter generation.
 Missing data and isolated dips do not reject runs. For `both`, use total leg power.
 No off time is invented; retired runs contribute zero duration/energy and cannot
@@ -69,7 +131,7 @@ Then `resolve_open_runs` sets the remaining open runs to:
 
 For even-sized lists, the code uses the upper middle value as its median.
 Running duration uses elapsed timestamp time. Run energy is estimated as
-`on_w * duration_s / 3600` Wh. It assumes constant power, including during staged
+`run.w * duration_s / 3600` Wh. It assumes constant power, including during staged
 startup. Today's energy clips the interval at local midnight and excludes unresolved
 runs. These are estimates, not appliance energy measurements.
 
@@ -88,10 +150,28 @@ If none fits, create a pattern at the run's size.
 
 Assignment uses the existing centres; centres are refreshed after assignment.
 An unnamed centre becomes the upper median on-size of its assigned runs in this
-window. A named centre stays frozen. The SQL update also guards against a name
+window. A named centre stays frozen apart from the surge migration below. The SQL update also guards against a name
 being added while recomputation is in progress. Clearing a name permits later
 centre updates again. Names are trimmed to 60 characters; blank becomes null.
 Naming also clears the ignored flag.
+
+Before assigning resized runs, recover their historical pattern associations by
+generation, start frame, legs and start timestamp. On first upgrade, settings have
+no saved run associations: reconstruct them from each run's reported pre-resize
+shape against the original pattern snapshot. Re-centre the affected patterns at
+their members' adjusted upper median, preserving IDs, names and ignored flags.
+Associated resized runs retain their pattern even when another named centre is
+closer. An unassociated surge cannot join a named/ignored pattern using settled
+watts alone. Saved surge signatures allow future activations to rejoin migrated
+patterns after the 48-hour run history expires; these signatures are separate
+from the public window's nullable `inrush_w` median. Associations and signatures
+live in `settings.db`; temporary cycle assignment does not write them.
+
+Patterns store `inrush_w` as the median reported surge size among adjusted members
+in this window (the average of the two middle values for an even count), or null
+when there are none. Non-surge members do not enter this median. This field is
+refreshed even for named patterns, whose running-size centre stays frozen. Existing
+settings databases gain the nullable column automatically without changing names.
 
 The stored count `n` is this window's run count, not a lifetime count. `last_seen`
 is the latest assigned run's start timestamp. Pruning deletes only patterns with
@@ -140,6 +220,17 @@ the pattern ID and assignment depend on the other runs and saved patterns.
 
 ## Known limitations
 
+- Settled sizing is a background-subtracted heuristic, not proof of a motor or
+  device identity. Unreported background changes and small switching below the
+  overlap threshold can distort the rise, including creating a false small run
+  from a surge-shaped delta with no sustained load. Baseline-relative floors and
+  20% surge pairing recover the 901 W pool replay against its 1054 W off; see the
+  [round 3 findings](findings.md#2026-10-16-baseline-relative-evidence-replay-round-3).
+  Slack is now bounded relative to load size, but shared closures during program
+  chatter can still be questionable even with nearby starts. The conductor-aware
+  overlap guard conservatively skips the probable well pump's settled window in
+  the current replay because an L1 −124.9 W event occurs inside it; that run now
+  remains unresolved at its reported size. See the review follow-up in findings.md.
 - Multi-step offs do not combine. A load whose total off arrives as several
   smaller drops may never close. It can become unresolved and later expire.
 - One appliance can split across patterns when its on-size changes by more than

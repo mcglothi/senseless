@@ -39,7 +39,7 @@ def test_newer_cycle_disproves_two_similar_loads_remaining_on_together():
     ds = [delta(0, 100), delta(600, -60), delta(1200, 105),
           delta(1800, -105), delta(18000, -100)]
     rs = readings(18010, lambda t: (125 if 1200 <= t < 1800 else 120, 900))
-    old, new = detect_runs(ds, 18010, rs)
+    old, new = detect_runs(ds, 18010, rs, startup_readings=[])
     assert old.status == "unresolved" and old.end_frame is None
     assert new.status == "closed" and new.duration_s(0) == 600
 
@@ -64,6 +64,9 @@ def test_genuine_long_load_survives_with_interleaved_cycles(duration, legs):
 def test_invalid_newest_candidate_does_not_steal_off_from_supported_older_on():
     ds = [delta(0, 100), delta(10, 125), delta(100, -110)]
     rs = readings(110, lambda t: (90 if 40 <= t < 70 else 250, 900))
+    # No covered pre-window: this exercises the absolute fallback. With a
+    # baseline, this instead exercises the baseline-relative floor.
+    rs = [r for r in rs if r["ts"] >= 10]
     old, new = detect_runs(ds, 110, rs)
     assert old.status == "closed" and old.duration_s(0) == 100
     assert new.status == "unresolved" and new.end_frame is None
@@ -139,6 +142,75 @@ def test_detector_recompute_loads_power_evidence(tmp_path):
     run, = detector.runs
     assert run.status == "unresolved" and run.end_frame is None
     assert detector.loads(0)[0]["wh_window"] == 0
+
+
+@pytest.mark.parametrize("legs", ["L1", "L2", "both"])
+@pytest.mark.parametrize("floor,closed", [(2100, False), (2617, False), (2618, True)])
+def test_baseline_relative_floor_rejects_stale_run_on_loaded_leg(legs, floor, closed):
+    channels = (0, 1) if legs == "both" else (0,) if legs == "L1" else (1,)
+    ds = [delta(t, w / len(channels), ch)
+          for t, w in ((30, 1080), (200, -1080)) for ch in channels]
+    def level(t):
+        total = 2000 if t < 30 else floor if 80 <= t < 100 else 3080
+        return tuple(total / len(channels) if ch in channels else 0 for ch in (0, 1))
+    run, = detect_runs(ds, 210, readings(210, level))
+    # 2000 + .85*1080 - 300 = 2618; equality remains supported.
+    assert (run.end_frame == 200 * 60) is closed
+    assert run.status == ("closed" if closed else "unresolved")
+
+
+@pytest.mark.parametrize("kind", ["missing", "coverage", "nonfinite", "coarse"])
+def test_unavailable_baseline_falls_back_to_absolute_floor(kind):
+    from senseless.detect import bin_readings
+    ds = [delta(30, 1080), delta(200, -1080)]
+    rs = readings(210, lambda t: (2000 if t < 30 else 2100, 0))
+    if kind == "missing":
+        rs = [r for r in rs if not 18 <= r["ts"] < 28]
+    elif kind == "coverage":
+        rs = [r for r in rs if not 18 <= r["ts"] < 22]
+    elif kind == "nonfinite":
+        for r in rs:
+            if 18 <= r["ts"] < 28:
+                r["l1_w"] = math.nan
+    else:
+        rs = bin_readings(rs)
+    run, = detect_runs(ds, 210, rs)
+    assert run.end_frame == 200 * 60
+
+
+def test_relative_floor_allows_background_offs_and_ignores_isolated_dips():
+    ds = [delta(30, 900), delta(200, -900)]
+    rs = readings(210, lambda t: (1000 if t < 30 else 1900 if t < 80 else 1650, 0))
+    rs[100]["l1_w"] = 0
+    run, = detect_runs(ds, 210, rs)
+    assert run.end_frame == 200 * 60
+
+
+def test_completed_newer_overlap_uses_older_baseline_once():
+    ds = [delta(30, 1000), delta(90, 1000), delta(120, -1000), delta(200, -1000)]
+    rs = readings(210, lambda t: (1000 + 1000 * (30 <= t < 200) +
+                                  1000 * (90 <= t < 120), 0))
+    old, new = detect_runs(ds, 210, rs)
+    assert old.end_frame == 200 * 60 and new.end_frame == 120 * 60
+
+
+def test_sql_baseline_for_small_overlapped_non_surge_start_matches_raw(tmp_path):
+    from senseless.detect import load_deltas, load_readings, load_startup_readings
+    from senseless.store import Store
+    db = tmp_path / "data.db"
+    Store(db).close()
+    ds = [delta(30, 240), delta(40, -120), delta(200, -240)]
+    rs = readings(210, lambda t: (2000 if t < 30 else 2100 if t < 80 else 1600, 0))
+    with sqlite3.connect(db) as conn:
+        conn.executemany("INSERT INTO deltas (generation,start_frame,frame,ts,channel,w) "
+                         "VALUES (:generation,:start_frame,:start_frame,:ts,:channel,:w)", ds)
+        conn.executemany("INSERT INTO readings (generation,frame,ts,l1_w,l2_w) "
+                         "VALUES (:generation,:frame,:ts,:l1_w,:l2_w)", rs)
+    raw, = detect_runs(ds, 210, rs)
+    sql, = detect_runs(load_deltas(db, 0), 210, load_readings(db, 0),
+                       startup_readings=load_startup_readings(db, ds))
+    assert sql.status == raw.status == "unresolved"
+    assert sql.end_frame is raw.end_frame is None
 
 
 def test_sql_binning_matches_python(tmp_path):
