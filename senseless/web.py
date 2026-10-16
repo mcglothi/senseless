@@ -12,6 +12,7 @@ from aiohttp import web
 from . import summary
 from .appearance import Appearance, AppearanceError
 from .circuits import CircuitError, Circuits
+from .history import History, HistoryError
 from .state import CLOSE, LiveState
 
 LEGS = ("L1", "L2")
@@ -21,7 +22,7 @@ def _esc(s: str) -> str:
     return str(s).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
 
 
-def render_metrics(st: LiveState, db_path: Path) -> str:
+def render_metrics(st: LiveState, db_path: Path, detector=None) -> str:
     p = st.latest
     out = []
 
@@ -57,6 +58,22 @@ def render_metrics(st: LiveState, db_path: Path) -> str:
     m("senseless_reconnects_total", "Feed reconnects", "counter", [({}, st.reconnects)])
     size = sum(f.stat().st_size for f in db_path.parent.glob(db_path.name + "*") if f.is_file())
     m("senseless_db_bytes", "SQLite database size incl. WAL", "gauge", [({}, size)])
+    if detector is not None and detector.computed_at:
+        loads = detector.loads(summary.day_bounds()[0])
+        named = {}
+        for p in loads:  # a device can span several patterns that share a name
+            if p["name"]:
+                n = named.setdefault(p["name"], {"running": 0, "wh": 0.0, "legs": p["legs"]})
+                n["running"] |= int(bool(p["running"]))
+                n["wh"] += p["wh_today"]
+        m("senseless_detection_age_seconds", "Seconds since detection last recomputed", "gauge", [({}, round(time.time() - detector.computed_at, 1))])
+        m("senseless_patterns", "Detected load patterns in the window", "gauge",
+          [({"state": s}, sum(1 for p in loads if (p["name"] and s == "named") or (not p["name"] and p["ignored"] and s == "ignored")
+                              or (not p["name"] and not p["ignored"] and s == "unnamed"))) for s in ("named", "unnamed", "ignored")])
+        m("senseless_load_running", "1 while a named load is on", "gauge",
+          [({"load": k, "legs": v["legs"]}, v["running"]) for k, v in sorted(named.items())])
+        m("senseless_load_energy_today_wh", "Energy of a named load since local midnight", "gauge",
+          [({"load": k, "legs": v["legs"]}, round(v["wh"], 1)) for k, v in sorted(named.items())])
     return "\n".join(out) + "\n"
 
 
@@ -129,6 +146,12 @@ tick();setInterval(tick,3000);
 </script></body></html>"""
 
 
+def _static_file(path: Path):
+    async def handler(_req):
+        return web.FileResponse(path, headers={"Cache-Control": "max-age=86400"})
+    return handler
+
+
 def _web_dir() -> Path | None:
     """The built frontend (web/dist). Docker copies it to /app/web; locally it's the repo's web/dist."""
     for d in (os.environ.get("SENSELESS_WEB_DIR"), Path(__file__).resolve().parent.parent / "web" / "dist"):
@@ -138,12 +161,12 @@ def _web_dir() -> Path | None:
 
 
 def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None,
-             detector=None, circuits: Circuits | None = None) -> web.Application:
+             detector=None, circuits: Circuits | None = None, history: History | None = None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
     async def metrics(_):
-        return web.Response(text=render_metrics(st, db_path), content_type="text/plain", charset="utf-8")
+        return web.Response(text=render_metrics(st, db_path, detector), content_type="text/plain", charset="utf-8")
 
     async def status(_):
         age = st.message_age()
@@ -325,6 +348,15 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             raise web.HTTPNotFound(text="no such circuit")
         return web.json_response({"ok": True})
 
+    # ── history (Sense cloud, cached) ───────────────────────────────────────
+    async def history_get(req):
+        if history is None:
+            raise web.HTTPNotFound(text="history not configured")
+        try:
+            return web.json_response(await asyncio.to_thread(history.get, req.query.get("scale", "month"), req.query.get("date", "")))
+        except HistoryError as e:
+            return web.json_response({"error": str(e)}, status=400 if "date" in str(e) or "scale" in str(e) or "future" in str(e) else 502)
+
     web_dir = web_dir or _web_dir()
 
     async def index(_):
@@ -350,16 +382,23 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.post("/api/loads/{id}/name", load_name), web.post("/api/loads/{id}/ignore", load_ignore),
         web.get("/api/circuits", circuits_get), web.post("/api/circuits", circuits_add),
         web.delete("/api/circuits/{id}", circuits_remove),
+        web.get("/api/history", history_get),
     ])
     if web_dir and (web_dir / "assets").is_dir():
         app.router.add_static("/assets", web_dir / "assets", append_version=False)
+    if web_dir:
+        # installable app (PWA): manifest + icons from web/public
+        for name in ("manifest.webmanifest", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"):
+            if (web_dir / name).exists():
+                app.router.add_get(f"/{name}", _static_file(web_dir / name))
     return app
 
 
 async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None,
-                circuits: Circuits | None = None) -> web.AppRunner:
+                circuits: Circuits | None = None, history: History | None = None) -> web.AppRunner:
     # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
-    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits), access_log=None, shutdown_timeout=3)
+    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits, history=history),
+                             access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))
     await web.TCPSite(runner, os.environ.get("SENSELESS_HTTP_HOST", "0.0.0.0"), port).start()

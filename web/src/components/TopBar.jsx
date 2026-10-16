@@ -18,7 +18,7 @@ export const NAV = [
   { href: '/timeline', label: 'Timeline' },
   { href: '/loads', label: 'Loads' },
   { href: '/hunt', label: 'Hunt' },
-  { href: '/history', label: 'History', soon: true },
+  { href: '/history', label: 'History' },
 ]
 
 function LivePill({ status, frame }) {

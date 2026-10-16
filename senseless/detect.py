@@ -277,6 +277,65 @@ def detect_runs(deltas: list[dict], now_ts: float) -> list[Run]:
     return runs
 
 
+def load_sense_ons(db_path: Path, since_ts: float) -> list[dict]:
+    """Moments Sense's own detection says a device turned on (from device_power), with its size:
+    the device's peak watts in the 30 s after (Sense ramps its estimate up over a few updates)."""
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        rows = db.execute("SELECT ts, device_id, name, w FROM device_power WHERE ts >= ? AND name NOT IN ('Always On', 'Other') "
+                          "ORDER BY device_id, ts", (since_ts,)).fetchall()
+    finally:
+        db.close()
+    ON_W = 20.0
+    ons, prev = [], {}
+    for i, (ts, dev, name, w) in enumerate(rows):
+        w = w or 0.0
+        p = prev.get(dev, 0.0)
+        # a crossing of ON_W from below is one turn-on; Sense ramping its estimate (203 -> 298 -> 1700)
+        # or creeping up (0 -> 15 -> 100) still counts once
+        if w >= ON_W and p < ON_W:
+            peak = w
+            for r in rows[i + 1:i + 40]:
+                if r[1] != dev or r[0] > ts + 30 or (r[3] or 0) < ON_W:
+                    break  # stop at the next device, after 30 s, or when it turns off (no next activation)
+                peak = max(peak, r[3] or 0)
+            ons.append({"ts": ts, "name": name, "w": peak})
+        prev[dev] = w
+    return ons
+
+
+def sense_hints(runs: list[Run], ons: list[dict], min_share: float = 0.4, min_matches: int = 2) -> dict[int, dict]:
+    """Per pattern: the Sense device whose turn-ons line up with this pattern's runs (start within
+    -10..+30 s, Sense lags; size within 40%). Weak labels: shown as a suggestion, never applied."""
+    ons = sorted(ons, key=lambda o: o["ts"])
+    times = [o["ts"] for o in ons]
+    from bisect import bisect_left
+    votes: dict[int, dict[str, int]] = {}
+    totals: dict[int, int] = {}
+    used: set[int] = set()   # each Sense turn-on corroborates at most one run (the nearest)
+    for r in sorted(runs, key=lambda r: r.start_ts):
+        totals[r.pattern] = totals.get(r.pattern, 0) + 1
+        i = bisect_left(times, r.start_ts - 10)
+        best: dict[str, tuple] = {}
+        while i < len(ons) and ons[i]["ts"] <= r.start_ts + 30:
+            o = ons[i]
+            if i not in used and abs(o["w"] - r.w) <= 0.4 * max(r.w, o["w"]):
+                gap = abs(o["ts"] - r.start_ts)
+                if o["name"] not in best or gap < best[o["name"]][0]:
+                    best[o["name"]] = (gap, i)
+            i += 1
+        for n, (_, idx) in best.items():
+            used.add(idx)
+            votes.setdefault(r.pattern, {})[n] = votes.setdefault(r.pattern, {}).get(n, 0) + 1
+    hints = {}
+    for pid, v in votes.items():
+        name, n = max(v.items(), key=lambda kv: kv[1])
+        share = n / totals[pid]
+        if n >= min_matches and share >= min_share:
+            hints[pid] = {"name": name, "matches": n, "share": round(share, 2)}
+    return hints
+
+
 class Detector:
     """Recomputes runs over the window and keeps the latest result for the API."""
 
@@ -284,6 +343,7 @@ class Detector:
         self.deltas_db = deltas_db
         self.patterns = Patterns(settings_db)
         self.runs: list[Run] = []
+        self.hints: dict[int, dict] = {}
         self.computed_at = 0.0
 
     def recompute(self, now_ts: float | None = None) -> None:
@@ -291,6 +351,10 @@ class Detector:
         runs = detect_runs(load_deltas(self.deltas_db, now_ts - WINDOW_S), now_ts)
         self.patterns.assign(runs)
         resolve_open_runs(runs, now_ts)
+        try:
+            self.hints = sense_hints(runs, load_sense_ons(self.deltas_db, now_ts - WINDOW_S))
+        except sqlite3.Error:
+            self.hints = {}
         self.runs, self.computed_at = runs, now_ts
 
     def runs_since(self, since_ts: float) -> list[dict]:
@@ -317,9 +381,10 @@ class Detector:
         now = time.time()
         stats: dict[int, dict] = {}
         for r in self.runs:
-            s = stats.setdefault(r.pattern, {"runs_window": 0, "runs_today": 0, "wh_today": 0.0, "durations": [],
+            s = stats.setdefault(r.pattern, {"runs_window": 0, "runs_today": 0, "wh_today": 0.0, "wh_window": 0.0, "durations": [],
                                              "last_ts": 0.0, "running": False, "example": None})
             s["runs_window"] += 1
+            s["wh_window"] += r.w * r.duration_s(now) / 3600
             if r.status == "closed":
                 s["durations"].append(r.duration_s(now))
             s["last_ts"] = max(s["last_ts"], r.start_ts)
@@ -340,10 +405,10 @@ class Detector:
                 if not p["name"]:
                     continue
                 # named patterns stay listed even when not seen in the window
-                s = {"runs_window": 0, "runs_today": 0, "wh_today": 0.0, "durations": [], "last_ts": p.get("last_seen") or 0.0,
+                s = {"runs_window": 0, "runs_today": 0, "wh_today": 0.0, "wh_window": 0.0, "durations": [], "last_ts": p.get("last_seen") or 0.0,
                      "running": False, "example": None}
             ds = sorted(s.pop("durations"))
-            out.append({**p, **s, "wh_today": round(s["wh_today"], 1),
+            out.append({**p, **s, "sense_hint": self.hints.get(p["id"]), "wh_today": round(s["wh_today"], 1), "wh_window": round(s["wh_window"], 1),
                         "median_duration_s": round(ds[len(ds) // 2], 1) if ds else None, "closed_runs": len(ds)})
         out.sort(key=lambda x: (-x["wh_today"], -x["runs_window"]))
         return out
