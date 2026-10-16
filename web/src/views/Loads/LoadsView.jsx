@@ -3,7 +3,7 @@ import { C, MONO, alpha, glow, useTheme } from '../../ui/theme'
 import { SectionTitle, Empty, toast } from '../../ui/primitives'
 import { busyTyping } from '../../api/api'
 import { fmtClock, fmtInt } from '../../ui/format'
-import { fingerprintPath, fmtDuration, inboxOf, legsLabel, nameIdeas } from '../../ui/loads'
+import { existingNames, fingerprintPath, fmtDuration, groupNamed, inboxOf, legsLabel, nameIdeas } from '../../ui/loads'
 
 // Loads: the patterns detection found, an inbox of the ones worth naming, and the ones
 // you've named. Naming is the whole point: once named, every future match carries it.
@@ -35,7 +35,7 @@ function Meta({ p }) {
   )
 }
 
-function InboxCard({ p, focused, onFocus, onName, onIgnore, inputRef }) {
+function InboxCard({ p, focused, onFocus, onName, onIgnore, inputRef, known = [] }) {
   const [text, setText] = useState('')
   const submit = async name => {
     const n = (name ?? text).trim()
@@ -63,7 +63,13 @@ function InboxCard({ p, focused, onFocus, onName, onIgnore, inputRef }) {
               flex: '1 1 140px', minWidth: 0, height: 34, background: C.panel, border: `1px solid ${C.line2}`, borderRadius: 8,
               color: C.text, fontFamily: MONO, fontSize: 12, padding: '0 10px', outline: 'none',
             }} />
-          {nameIdeas(p).map(idea => (
+          {known.map(n => (
+            <button key={`k-${n}`} type="button" onClick={() => submit(n)} title="Already a named load on these legs" style={{
+              cursor: 'pointer', minHeight: 32, fontFamily: MONO, fontSize: 11, padding: '4px 10px', borderRadius: 16,
+              color: C.accent, background: alpha(C.accent, '10'), border: `1px solid ${alpha(C.accent, '45')}`,
+            }}>= {n}</button>
+          ))}
+          {nameIdeas(p).filter(i => !known.some(k => k.toLowerCase() === i.toLowerCase())).map(idea => (
             <button key={idea} type="button" onClick={() => submit(idea)} style={{
               cursor: 'pointer', minHeight: 32, fontFamily: MONO, fontSize: 11, padding: '4px 10px', borderRadius: 16,
               color: C.body, background: 'transparent', border: `1px solid ${C.line2}`,
@@ -93,6 +99,11 @@ function NamedCard({ p, onRename }) {
       </div>
       <Fingerprint p={p} height={64} stroke={1.6} />
       <Meta p={p} />
+      {p.members?.length > 1 && (
+        <div style={{ fontFamily: MONO, fontSize: 10, color: C.dim }}>
+          {p.members.length} patterns: {p.members.map(m => `${legsLabel(m.legs)} ${fmtInt(m.center_w)} W`).join(' · ')}
+        </div>
+      )}
     </div>
   )
 }
@@ -101,7 +112,7 @@ export function LoadsView({ loads }) {
   const { sp } = useTheme()
   const { patterns, name, ignore, error, computed_at } = loads
   const inbox = useMemo(() => inboxOf(patterns), [patterns])
-  const named = useMemo(() => patterns.filter(p => p.name).sort((a, b) => b.wh_today - a.wh_today || b.runs_window - a.runs_window), [patterns])
+  const named = useMemo(() => groupNamed(patterns), [patterns])
   const running = useMemo(() => patterns.filter(p => p.running && !p.ignored), [patterns])
   const ignoredCount = patterns.filter(p => p.ignored && !p.name).length
   const [focus, setFocus] = useState(0)
@@ -129,7 +140,9 @@ export function LoadsView({ loads }) {
   const rename = p => {
     const n = window.prompt(`Rename "${p.name}" (empty to un-name)`, p.name)
     if (n === null) return
-    name(p, n.trim() || null).then(() => toast(n.trim() ? `Renamed "${n.trim()}"` : 'Back in the inbox'))
+    // a grouped card renames every pattern in the group
+    Promise.all((p.members ?? [p]).map(m => name(m, n.trim() || null)))
+      .then(() => toast(n.trim() ? `Renamed "${n.trim()}"` : 'Back in the inbox'))
   }
 
   if (error && !patterns.length) return <Empty title="Couldn't load patterns">{error}</Empty>
@@ -166,7 +179,7 @@ export function LoadsView({ loads }) {
             </div>
           )}
           {inbox.slice(0, 12).map((p, i) => (
-            <InboxCard key={p.id} p={p} focused={i === focus} onFocus={() => setFocus(i)} onName={name} onIgnore={ignore}
+            <InboxCard key={p.id} p={p} focused={i === focus} onFocus={() => setFocus(i)} onName={name} onIgnore={ignore} known={existingNames(patterns, p)}
               inputRef={el => { inputs.current[p.id] = el }} />
           ))}
           {inbox.length > 12 && <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>+{inbox.length - 12} more, most energy first</div>}

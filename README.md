@@ -34,8 +34,16 @@ Early. Today it has:
 - `senseless collect`: long-running collector, WebSocket → SQLite + daily raw `jsonl.gz` archive. Built to run
   unattended: stale-feed watchdog, re-auth on 401/403, malformed messages skipped, frame-counter reset handling,
   clean SIGTERM shutdown, raw archive retention.
-- **Web UI** at `/` (React, in `web/`): live Now view (per-leg power, today's energy and cost, the last 30 minutes
-  with every step the monitor caught, 240 V and repeating-load spotting, always-on estimate). Fully themeable:
+- **Web UI** at `/` (React, in `web/`), installable as a phone app:
+  - **Now**: live per-leg power, today's energy and cost, the last 30 minutes with every step the monitor caught,
+    240 V and repeating-load spotting, always-on estimate
+  - **Loads**: load patterns detected from the monitor's steps (`senseless/detect.py`), an inbox of repeating
+    unnamed patterns with fingerprints and name ideas; name once and every future match carries it
+  - **Timeline**: per-leg power, steps and detected runs across any window (drag to zoom, pan, inspect, name)
+  - **Hunt**: Breaker Hunt for the panel: flip a breaker, see exactly what dropped on which leg, save the map
+  - **History**: days, months and years from Sense's cloud history, with cost and Sense's per-device split
+
+  Fully themeable:
   base16 themes with a built-in gallery of 570 [tinted-theming](https://github.com/tinted-theming/schemes) schemes,
   light/dark/system, accent, background, density (theming engine shared with Docket). Default theme: **Senseless**.
 - HTTP API (port 8780): Prometheus `/metrics`, `/healthz`, live server-sent events `/api/stream`, JSON `/api/status`,

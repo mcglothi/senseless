@@ -48,6 +48,36 @@ export function nameIdeas(p) {
   return dur < 60 ? ['Relay / cycling device', 'Aquarium heater', 'Printer'] : ['Lights', 'Router / network', 'Fan']
 }
 
+// Named patterns grouped by name (case-insensitive): one device often shows up as two patterns when
+// its step size varies (47 W and 56 W). Stats combine; the biggest pattern draws the fingerprint.
+export function groupNamed(patterns) {
+  const groups = new Map()
+  for (const p of patterns) {
+    if (!p.name) continue
+    const key = p.name.trim().toLowerCase()
+    const g = groups.get(key)
+    if (!g) { groups.set(key, { ...p, members: [p] }); continue }
+    g.members.push(p)
+    g.runs_window += p.runs_window
+    g.runs_today = (g.runs_today ?? 0) + (p.runs_today ?? 0)
+    g.wh_today += p.wh_today
+    g.running = g.running || p.running
+    if (p.center_w > g.center_w) Object.assign(g, { id: p.id, center_w: p.center_w, example: p.example, median_duration_s: p.median_duration_s, closed_runs: p.closed_runs })
+  }
+  return [...groups.values()].sort((a, b) => b.wh_today - a.wh_today || b.runs_window - a.runs_window)
+}
+
+// Names already used for loads on the same legs: offered first, so a split device gets one name.
+export function existingNames(patterns, p, max = 2) {
+  const seen = new Set()
+  return patterns
+    .filter(x => x.name && x.legs === p.legs && x.id !== p.id)
+    .sort((a, b) => Math.abs(a.center_w - p.center_w) - Math.abs(b.center_w - p.center_w))
+    .map(x => x.name)
+    .filter(n => !seen.has(n.toLowerCase()) && seen.add(n.toLowerCase()))
+    .slice(0, max)
+}
+
 // Inbox: unnamed, not ignored, repeated enough to be worth naming. Most energy first.
 export function inboxOf(patterns, minRuns = 3) {
   return patterns
