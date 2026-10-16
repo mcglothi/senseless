@@ -283,6 +283,10 @@ function AlwaysOn({ latest, series, today }) {
         Sense's always-on estimate, split by the ratio of each leg's lowest point in the last 30 minutes.
         {share && share[1] >= 70 ? ' Most of it sits on L2: a breaker hunt there would find it.' : share && share[0] >= 70 ? ' Most of it sits on L1.' : ''}
       </p>
+      <a href="/hunt" onClick={link('/hunt')} style={{ alignSelf: 'flex-start', fontFamily: MONO, fontSize: 11, letterSpacing: 1, textTransform: 'uppercase',
+        padding: '10px 14px', borderRadius: 8, color: C.accent, background: alpha(C.accent, '14'), border: `1px solid ${alpha(C.accent, '45')}` }}>
+        Start breaker hunt →
+      </a>
     </Card>
   )
 }

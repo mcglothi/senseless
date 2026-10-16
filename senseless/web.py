@@ -11,6 +11,7 @@ from aiohttp import web
 
 from . import summary
 from .appearance import Appearance, AppearanceError
+from .circuits import CircuitError, Circuits
 from .state import CLOSE, LiveState
 
 LEGS = ("L1", "L2")
@@ -137,7 +138,7 @@ def _web_dir() -> Path | None:
 
 
 def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None,
-             detector=None) -> web.Application:
+             detector=None, circuits: Circuits | None = None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
@@ -294,6 +295,33 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         except KeyError:
             raise web.HTTPNotFound(text="no such pattern")
 
+    # ── breaker map (Breaker Hunt) ──────────────────────────────────────────
+    def _circ():
+        if circuits is None:
+            raise web.HTTPNotFound(text="circuits not configured")
+        return circuits
+
+    async def circuits_get(_):
+        return web.json_response(_circ().all())
+
+    async def circuits_add(req):
+        try:
+            return web.json_response(_circ().add(await _body(req)))
+        except CircuitError as e:
+            return _bad(e)
+
+    async def circuits_remove(req):
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        try:
+            _circ().remove(int(req.match_info["id"]))
+        except ValueError:
+            raise web.HTTPBadRequest(text="circuit id must be an integer")
+        except KeyError:
+            raise web.HTTPNotFound(text="no such circuit")
+        return web.json_response({"ok": True})
+
     web_dir = web_dir or _web_dir()
 
     async def index(_):
@@ -317,15 +345,18 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.get("/api/appearance", appearance_get), web.post("/api/appearance", appearance_post),
         web.get("/api/loads", loads), web.get("/api/runs", runs),
         web.post("/api/loads/{id}/name", load_name), web.post("/api/loads/{id}/ignore", load_ignore),
+        web.get("/api/circuits", circuits_get), web.post("/api/circuits", circuits_add),
+        web.delete("/api/circuits/{id}", circuits_remove),
     ])
     if web_dir and (web_dir / "assets").is_dir():
         app.router.add_static("/assets", web_dir / "assets", append_version=False)
     return app
 
 
-async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None) -> web.AppRunner:
+async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None,
+                circuits: Circuits | None = None) -> web.AppRunner:
     # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
-    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector), access_log=None, shutdown_timeout=3)
+    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector, circuits=circuits), access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))
     await web.TCPSite(runner, os.environ.get("SENSELESS_HTTP_HOST", "0.0.0.0"), port).start()
