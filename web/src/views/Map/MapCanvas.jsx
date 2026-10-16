@@ -183,7 +183,7 @@ export function MapCanvas({ floor, rollup, stateOf, nameOf, edit, tool, placing,
   const rooms = rollup.rooms.map(r => (draft?.room?.id === r.id ? { ...r, ...draft.room } : r))
     .concat(draft?.room && draft.room.id == null ? [{ ...draft.room, watts: 0, wh: 0, count: 0 }] : [])
   const inv = 1 / view.scale
-  const dense = view.scale * iw < 760     // whole floor small on screen: only active/selected devices show names
+  const dense = view.scale * iw < 600     // whole floor small on screen: only active/selected devices show names
   const cursor = edit && placing ? 'copy' : edit && tool === 'room' ? 'crosshair' : 'grab'
 
   return (
