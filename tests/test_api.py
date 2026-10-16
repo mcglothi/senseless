@@ -161,6 +161,10 @@ def test_stream_delivers_snapshot_then_events(tmp_path):
             # every core route is registered (a stray comment once dropped /healthz and /metrics)
             for path in ("/healthz", "/metrics", "/api/status", "/api/today", "/api/series", "/api/deltas", "/status"):
                 assert (await c.get(path)).status in (200, 503), path
+            # installable app files are served when the UI is built
+            if web._web_dir():
+                assert (await c.get("/manifest.webmanifest")).status == 200
+                assert (await c.get("/apple-touch-icon.png")).status == 200
             # client-side routes don't 404 on reload
             for path in ("/timeline", "/loads", "/history"):
                 assert (await c.get(path)).status == 200

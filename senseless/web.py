@@ -364,6 +364,11 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
     ])
     if web_dir and (web_dir / "assets").is_dir():
         app.router.add_static("/assets", web_dir / "assets", append_version=False)
+    if web_dir:
+        # installable app (PWA): manifest + icons from web/public
+        for name in ("manifest.webmanifest", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"):
+            if (web_dir / name).exists():
+                app.router.add_get(f"/{name}", lambda _req, f=web_dir / name: web.FileResponse(f, headers={"Cache-Control": "max-age=86400"}))
     return app
 
 
