@@ -31,3 +31,9 @@ is the core protocol reference.
 - Live data comes from `/api/stream` (SSE) via `hooks/useLive.js`; don't add polling for live numbers.
 - `npm test` (vitest) for pure helpers in `src/ui/format.js`; `npm run dev` proxies `/api` to `SENSELESS_API`.
 - Settings live in `settings.db`, NOT `senseless.db` (the collector holds a near-continuous write lock there).
+
+## README upkeep
+
+The README is the project's front page (screenshots in `docs/screenshots/`). With every release: update the
+feature tour for anything user-visible, refresh affected screenshots (1500x729 desktop, ~420 px phone; no
+cursor in frame), bump the image tag in `docker-compose.example.yml`, and add a CHANGELOG entry.
