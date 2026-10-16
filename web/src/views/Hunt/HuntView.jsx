@@ -70,15 +70,17 @@ export function HuntView({ live }) {
   const healthy = live.status.state === 'live' && live.status.healthy
   const settleTimer = useRef(null)
   useEffect(() => () => clearTimeout(settleTimer.current), [])
-  const latestRef = useRef({ readings, now })
-  latestRef.current = { readings, now }
+  const latestRef = useRef({ readings, now, healthy })
+  latestRef.current = { readings, now, healthy }
   // Start / Next: let the panel settle (a breaker just switched back on), then average 3 fresh seconds
   const start = () => {
     if (!healthy) { toast('The live feed is stale; wait for it to reconnect'); return }
     setStage('settling')
     clearTimeout(settleTimer.current)
     settleTimer.current = setTimeout(() => {
-      const { readings: rs, now: n } = latestRef.current
+      const { readings: rs, now: n, healthy: ok } = latestRef.current
+      // the feed can go stale during the settle: never baseline from old readings
+      if (!ok) { toast('Live feed went stale; try again when it is back'); setStage('idle'); return }
       const b = legAverage(rs, 3, n)
       if (b.n < 3) { toast('Waiting for live readings…'); setStage('idle'); return }
       setBaseline({ t: n, l1: b.l1, l2: b.l2 })
