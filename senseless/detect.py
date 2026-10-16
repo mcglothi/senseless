@@ -133,6 +133,30 @@ BUCKET_W = 5.0
 POWER_BIN_FRAMES = 5 * FPS
 
 
+def bin_readings(readings: list[dict]) -> list[dict]:
+    """Per POWER_BIN_FRAMES bin with enough coverage: each leg's maximum power (inf if any value is
+    missing). Same rule as load_readings' SQL, for raw rows."""
+    bins: dict[int, list[dict]] = {}
+    for row in readings:
+        bins.setdefault(row["frame"] // POWER_BIN_FRAMES, []).append(row)
+    out = []
+    for b, rows in sorted(bins.items()):
+        rows.sort(key=lambda row: row["frame"])
+        start = b * POWER_BIN_FRAMES
+        if (rows[0]["frame"] > start + FPS or
+                rows[-1]["frame"] < start + POWER_BIN_FRAMES - FPS or
+                any(y["frame"] - x["frame"] > 2 * FPS for x, y in zip(rows, rows[1:]))):
+            continue
+        item = {"generation": rows[0].get("generation", 0), "bin_start": start}
+        for leg, keys in (("L1", ("l1_w",)), ("L2", ("l2_w",)), ("both", ("l1_w", "l2_w"))):
+            values = [sum(row[k] for k in keys) if all(
+                row.get(k) is not None and math.isfinite(row[k]) for k in keys
+            ) else math.inf for row in rows]
+            item[leg] = max(values)
+        out.append(item)
+    return out
+
+
 class PowerEvidence:
     """Range minima of sustained leg power, keyed by frame within one generation.
 
@@ -142,24 +166,10 @@ class PowerEvidence:
     """
 
     def __init__(self, readings: list[dict]):
-        bins: dict[int, list[dict]] = {}
-        for row in readings:
-            bins.setdefault(row["frame"] // POWER_BIN_FRAMES, []).append(row)
-        self.frames = []
-        powers = {leg: [] for leg in ("L1", "L2", "both")}
-        for b, rows in sorted(bins.items()):
-            rows.sort(key=lambda row: row["frame"])
-            start = b * POWER_BIN_FRAMES
-            if (rows[0]["frame"] > start + FPS or
-                    rows[-1]["frame"] < start + POWER_BIN_FRAMES - FPS or
-                    any(y["frame"] - x["frame"] > 2 * FPS for x, y in zip(rows, rows[1:]))):
-                continue
-            self.frames.append(start)
-            for leg, keys in (("L1", ("l1_w",)), ("L2", ("l2_w",)), ("both", ("l1_w", "l2_w"))):
-                values = [sum(row[k] for k in keys) if all(
-                    row.get(k) is not None and math.isfinite(row[k]) for k in keys
-                ) else math.inf for row in rows]
-                powers[leg].append(max(values))
+        # pre-binned rows (load_readings, done in SQL) or raw per-second readings (tests, replays)
+        bins = readings if readings and "bin_start" in readings[0] else bin_readings(readings)
+        self.frames = [b["bin_start"] for b in bins]
+        powers = {leg: [b[leg] for b in bins] for leg in ("L1", "L2", "both")}
         # Segment trees keep each candidate check logarithmic rather than
         # rescanning hours of per-second readings for every unmatched on.
         self.n = len(self.frames)
@@ -247,7 +257,7 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
     # Preserve the existing six-hour expiry, including power-retired ons.
     runs = [r for r in runs if r.end_frame is not None or now_ts - r.start_ts <= MAX_RUN_S]
     if power is not None and readings:
-        end = max(row["frame"] for row in readings) + STAGE_FRAMES
+        end = max(row["frame"] if "frame" in row else row["bin_start"] + POWER_BIN_FRAMES for row in readings) + STAGE_FRAMES
         for r in runs:
             if r.running and power.contradicts(r, end):
                 r.status = "unresolved"
@@ -451,9 +461,24 @@ def load_readings(db_path: Path, since_ts: float) -> list[dict]:
     try:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='readings'").fetchone():
             return []
-        db.row_factory = sqlite3.Row
-        return [dict(row) for row in db.execute(
-            "SELECT generation, frame, l1_w, l2_w FROM readings WHERE ts >= ?", (since_ts,))]
+        # binned in SQL (48 h of per-second readings is ~350k rows; the bins are ~35k), with the same
+        # coverage rule as bin_readings: first/last within a second of the bin edges, no gap over 2 s
+        rows = db.execute("""
+            WITH r AS (
+                SELECT generation AS g, frame AS f, l1_w AS a, l2_w AS b, frame / :bin AS k,
+                       frame - LAG(frame) OVER (PARTITION BY generation, frame / :bin ORDER BY frame) AS gap
+                FROM readings WHERE ts >= :since)
+            SELECT g, k, MIN(f), MAX(f), COALESCE(MAX(gap), 0), MAX(a), MAX(b), MAX(a + b),
+                   SUM(a IS NULL), SUM(b IS NULL)
+            FROM r GROUP BY g, k ORDER BY g, k""", {"bin": POWER_BIN_FRAMES, "since": since_ts}).fetchall()
+        out = []
+        for g, k, first, last, gap, a, b, both, na, nb in rows:
+            start = k * POWER_BIN_FRAMES
+            if first > start + FPS or last < start + POWER_BIN_FRAMES - FPS or gap > 2 * FPS:
+                continue
+            out.append({"generation": g, "bin_start": start, "L1": math.inf if na else a, "L2": math.inf if nb else b,
+                        "both": math.inf if na or nb else both})
+        return out
     finally:
         db.close()
 

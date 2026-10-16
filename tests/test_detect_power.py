@@ -139,3 +139,31 @@ def test_detector_recompute_loads_power_evidence(tmp_path):
     run, = detector.runs
     assert run.status == "unresolved" and run.end_frame is None
     assert detector.loads(0)[0]["wh_window"] == 0
+
+
+def test_sql_binning_matches_python(tmp_path):
+    """load_readings bins in SQL; bin_readings is the same rule in Python. They must agree, gaps,
+    missing values and generations included."""
+    import math as _m
+    import random
+    import sqlite3 as _sq
+    from senseless.detect import bin_readings, load_readings
+    from senseless.store import Store
+    Store(tmp_path / "s.db")
+    rnd = random.Random(7)
+    rows = []
+    for gen in (0, 1):
+        f = 0
+        while f < 60 * 60 * 20:
+            f += 150 if rnd.random() < 0.01 else rnd.choice([29, 30, 31])   # ~2/s, occasional 2.5 s gaps
+            l1 = None if rnd.random() < 0.002 else rnd.uniform(50, 900)
+            rows.append({"generation": gen, "frame": f, "ts": 1000 + f / 60, "l1_w": l1, "l2_w": rnd.uniform(50, 900)})
+    with _sq.connect(tmp_path / "s.db") as conn:
+        conn.executemany("INSERT INTO readings (generation,frame,ts,l1_w,l2_w) VALUES (:generation,:frame,:ts,:l1_w,:l2_w)", rows)
+    sql = load_readings(tmp_path / "s.db", 0)
+    py = [b for g in (0, 1) for b in bin_readings([r for r in rows if r["generation"] == g])]
+    assert len(sql) == len(py) > 100
+    for a, b in zip(sql, py):
+        assert (a["generation"], a["bin_start"]) == (b["generation"], b["bin_start"])
+        for leg in ("L1", "L2", "both"):
+            assert (_m.isinf(a[leg]) and _m.isinf(b[leg])) or abs(a[leg] - b[leg]) < 1e-6
