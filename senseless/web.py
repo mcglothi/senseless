@@ -190,6 +190,9 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         cost = (st.latest or {}).get("defaultCost")
         return web.json_response(await asyncio.to_thread(summary.today, db_path, cost))
 
+    async def baseline_get(_):
+        return web.json_response(await asyncio.to_thread(summary.baseline, db_path))
+
     async def series(req):
         start, end = _window(req, 30, 7 * 24 * 60)
         try:
@@ -374,7 +377,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt")],
         web.get("/healthz", healthz), web.get("/metrics", metrics),
         web.get("/api/status", status), web.get("/api/deltas", deltas), web.get("/api/readings", readings),
-        web.get("/api/today", today), web.get("/api/series", series), web.get("/api/stream", stream),
+        web.get("/api/today", today), web.get("/api/series", series), web.get("/api/baseline", baseline_get), web.get("/api/stream", stream),
         web.get("/api/themes", themes), web.get("/api/themes/gallery", themes_gallery),
         web.post("/api/themes/install", themes_install), web.delete("/api/themes/{id}", themes_remove),
         web.get("/api/appearance", appearance_get), web.post("/api/appearance", appearance_post),

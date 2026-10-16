@@ -92,6 +92,19 @@ export function useLive() {
   return { latest, series, deltas, status }
 }
 
+// Senseless's own always-on baseline (each leg's 5th percentile over 24 h); refreshed every 5 min.
+export function useBaseline() {
+  const [b, setB] = useState(null)
+  useEffect(() => {
+    let alive = true
+    const load = () => api('GET', '/api/baseline').then(d => { if (alive) setB(d) }).catch(() => {})
+    load()
+    const id = setInterval(load, 300000)
+    return () => { alive = false; clearInterval(id) }
+  }, [])
+  return b
+}
+
 // Today's energy summary; refreshed every 30 s (it's an aggregate, not a live number).
 export function useToday() {
   const [today, setToday] = useState(null)
