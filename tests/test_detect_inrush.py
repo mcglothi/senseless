@@ -43,6 +43,18 @@ def test_surge_sizes_by_settled_power_and_closes(legs):
     assert run.stages == [(0, 2200)]  # preserve the monitor's reported stages
 
 
+@pytest.mark.parametrize("off,closes", [(800, True), (799, False), (1170, True),
+                                       (1200, True), (1201, False)])
+@pytest.mark.parametrize("surge", [True, False])
+def test_only_surge_sized_runs_get_twenty_percent_pairing(off, closes, surge):
+    ds, rs = motor(on=2200 if surge else 1000)
+    ds[-1]["w"] = -off
+    run, = detect_runs(ds, 140, rs)
+    expected = closes if surge else abs(1000 - off) <= 150
+    assert (run.end_frame == 130 * 60) is expected
+    assert (run.inrush_w is not None) is surge
+
+
 @pytest.mark.parametrize("level,on", [(1000, 1000), (1000, 1250), (29, 2200), (100, 299)])
 def test_non_surge_or_subthreshold_on_is_untouched(level, on):
     ds, rs = motor(on=on, level=level)

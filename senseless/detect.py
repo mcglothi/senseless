@@ -8,7 +8,7 @@ Pipeline, recomputed over a sliding window (cheap: a few thousand deltas a day):
    (a microwave: +299 W, then +1,726 W 90 cycles later).
 3. **Runs**: covered pre/settled leg means size surge starts by their running level. An
    "off" step closes the most recent compatible "on" on the same legs (size
-   within PAIR_TOL), then tries a bounded pair sharing that off. Sustained leg power can
+   within 15%, or 20% for a settled surge), then tries a bounded pair sharing that off. Sustained leg power can
    disprove either match. Missed offs become unresolved.
 4. **Patterns**: runs are grouped by legs + stage count + size; a run joins the nearest known
    pattern centre within CLUSTER_TOL, else starts a new one. Patterns and their names persist in
@@ -24,7 +24,7 @@ import time
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
 from statistics import median
@@ -33,8 +33,11 @@ MIN_STEP_W = 30          # below this the on-board steps are mostly noise floor
 PAIR_240_TOL = 0.25      # L1/L2 size mismatch allowed for one 240 V step
 STAGE_FRAMES = 120       # 2 s at 60 Hz (microwave stages: 90 cycles apart)
 PAIR_TOL = 0.15          # off step within 15% (or PAIR_ABS_W) of the on step
+INRUSH_PAIR_TOL = 0.20   # settled rise is an estimate, unlike a reported plain on
 PAIR_ABS_W = 20
+SLACK_W = 300           # allow unrelated background loads to switch off
 SHARED_OFF_CAP = 12      # at most 66 pairs per unmatched off; 0 disables shared offs
+SHARED_START_S = 600     # shared timer/strip loads must start within ten minutes
 MAX_RUN_S = 6 * 3600
 CLUSTER_TOL = 0.12
 WINDOW_S = 48 * 3600
@@ -141,7 +144,8 @@ def merge_stages(steps: list[Step]) -> list[Step]:
 
 def _compatible(on: Run, off: Step) -> bool:
     diff = abs(on.w - abs(off.w))
-    return diff <= max(PAIR_TOL * on.w, PAIR_ABS_W)
+    tol = INRUSH_PAIR_TOL if on.inrush_w is not None else PAIR_TOL
+    return diff <= max(tol * on.w, PAIR_ABS_W)
 
 
 def startup_candidates(steps: list[Step]):
@@ -252,11 +256,15 @@ class PowerEvidence:
     A bin contributes its *maximum* power: all its samples must contradict an on
     before we reject it. Require coverage across the five-second bin, with no
     gaps over two seconds. Missing data and isolated dips are not evidence.
+    Covered pre-start means anchor the floor to the background load; otherwise
+    retain the absolute on-size floor. Combined loads use the earlier baseline.
     """
 
-    def __init__(self, readings: list[dict]):
+    def __init__(self, readings: list[dict], startup: StartupPower | None = None):
         # pre-binned rows (load_readings, done in SQL) or raw per-second readings (tests, replays)
         bins = readings if readings and "bin_start" in readings[0] else bin_readings(readings)
+        self.startup = startup
+        self.baselines = {}
         self.frames = [b["bin_start"] for b in bins]
         powers = {leg: [b[leg] for b in bins] for leg in ("L1", "L2", "both")}
         # Segment trees keep each candidate check logarithmic rather than
@@ -269,13 +277,23 @@ class PowerEvidence:
                 tree[i] = min(tree[2 * i], tree[2 * i + 1])
             self.trees[leg] = tree
 
-    def contradicts(self, run: Run, end_frame: int, extra_floor: float = 0) -> bool:
+    def contradicts(self, run: Run, end_frame: int, *, baseline_run: Run | None = None,
+                    combined_w: float | None = None) -> bool:
         # Leave startup/stages and the candidate off's own transition out.
         start = run.start_frame + run.stages[-1][0] + STAGE_FRAMES
         stop = end_frame - STAGE_FRAMES - POWER_BIN_FRAMES
         lo = bisect_left(self.frames, start) + self.n
         hi = bisect_right(self.frames, stop) + self.n
-        floor = run.w - max(PAIR_TOL * run.w, PAIR_ABS_W) + extra_floor
+        anchor = baseline_run if baseline_run is not None else run
+        key = (anchor.start_frame, anchor.legs)
+        if key not in self.baselines:
+            self.baselines[key] = self.startup.mean(
+                anchor.start_frame - 12 * FPS, anchor.start_frame - 2 * FPS, anchor.legs
+            ) if self.startup is not None else None
+        pre = self.baselines[key]
+        w = run.w if combined_w is None else combined_w
+        floor = (pre + .85 * w - SLACK_W if pre is not None else
+                 w - max(PAIR_TOL * w, PAIR_ABS_W))
         tree = self.trees[run.legs]
         while lo < hi:
             if lo % 2:
@@ -296,15 +314,16 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
     """Close each off with one compatible on, falling back to a bounded pair on the same legs.
     Open runs are indexed by legs and 5 W size bucket, so an off only looks at sizes it could match:
     thousands of unmatched ons (missed offs, noise) stay linear instead of quadratic.
-    When readings are available, a sustained power floor below an on's size
+    When readings are available, a sustained power floor below an on's expected level
     retires it as unresolved before it can steal a later off. No end is invented.
     """
     runs: list[Run] = []
-    power = PowerEvidence(readings) if readings else None
     # Five-second maxima/means remain dedicated to pairing/cycles. Never use
     # a coarse bin straddling the on-step as its pre-start baseline.
     means = startup_readings if startup_readings is not None else readings or []
-    sizes = StartupPower(means).sizes(steps) if means and "bin_start" not in means[0] else {}
+    startup = StartupPower(means) if means and "bin_start" not in means[0] else None
+    sizes = startup.sizes(steps) if startup is not None else {}
+    power = PowerEvidence(readings, startup) if readings else None
     open_by: dict[str, dict[int, list[tuple[int, Run]]]] = {}
     # Linked order keeps a capped reverse traversal O(cap), even after thousands
     # of newer starts close and leave only old unmatched ons behind.
@@ -320,7 +339,8 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
             continue
         x = abs(s.w)
         # every on size that _compatible() could accept for this off
-        lo, hi = min(x / (1 + PAIR_TOL), x - PAIR_ABS_W), max(x / (1 - PAIR_TOL), x + PAIR_ABS_W)
+        tol = max(PAIR_TOL, INRUSH_PAIR_TOL)
+        lo, hi = min(x / (1 + tol), x - PAIR_ABS_W), max(x / (1 - tol), x + PAIR_ABS_W)
         buckets = open_by.get(s.legs, {})
         opened = recent.get(s.legs, {})
         best = None
@@ -356,8 +376,8 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
                     lst = buckets.get(b, [])
                     for j, older in lst:
                         if older.start_frame < r.start_frame and _compatible(older, s):
-                            floor = older.w - max(PAIR_TOL * older.w, PAIR_ABS_W)
-                            if power.contradicts(r, s.frame, extra_floor=floor):
+                            if power.contradicts(r, s.frame, combined_w=r.w + older.w,
+                                                 baseline_run=older):
                                 older.status = "unresolved"
                                 opened.pop(j, None)
                     lst[:] = [(j, older) for j, older in lst if older.running]
@@ -370,15 +390,17 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
             pair, rank = None, None
             for a, (i, newer) in enumerate(candidates):
                 for j, older in candidates[a + 1:]:
+                    if newer.start_frame - older.start_frame > SHARED_START_S * FPS:
+                        continue
                     total = newer.w + older.w
                     error = abs(total - x)
                     if error > max(PAIR_TOL * total, PAIR_ABS_W):
                         continue
                     if power is not None and (
                         power.contradicts(older, s.frame) or power.contradicts(newer, s.frame) or
-                        # The overlap must support their summed load, with the
-                        # same tolerance as a single load of that size.
-                        power.contradicts(replace(newer, w=total), s.frame)
+                        # The overlap must support their summed load.
+                        # The newer baseline already contains the older load.
+                        power.contradicts(newer, s.frame, combined_w=total, baseline_run=older)
                     ):
                         continue
                     score = (abs(newer.start_frame - older.start_frame), error)
@@ -616,7 +638,7 @@ def detect_runs(deltas: list[dict], now_ts: float, readings: list[dict] | None =
 
 
 def load_startup_readings(db_path: Path, deltas: list[dict]) -> list[dict]:
-    """SQL one-second means only near eligible starts, using the (generation, frame) index.
+    """SQL baseline means for every on, plus eligible starts' settled means.
 
     Avoid materializing 48 hours of fine bins or changing five-second cycle energy.
     Coalesce overlapping windows so each reading is loaded at most once.
@@ -631,9 +653,13 @@ def load_startup_readings(db_path: Path, deltas: list[dict]) -> list[dict]:
             return []
         for gen, ds in by_gen.items():
             windows = []
-            for s, last in startup_candidates(to_steps(ds)):
-                for start, stop in ((s.frame - 12 * FPS, s.frame - 2 * FPS), (last + 6 * FPS, last + 20 * FPS)):
-                    windows.append((max(0, start // FPS * FPS), math.ceil(stop / FPS) * FPS))
+            steps = to_steps(ds)
+            windows.extend((max(0, (s.frame - 12 * FPS) // FPS * FPS),
+                            math.ceil((s.frame - 2 * FPS) / FPS) * FPS)
+                           for s in steps if s.w > 0)
+            for s, last in startup_candidates(steps):
+                start, stop = last + 6 * FPS, last + 20 * FPS
+                windows.append((start // FPS * FPS, math.ceil(stop / FPS) * FPS))
             merged = []
             for start, stop in sorted(windows):
                 if merged and start <= merged[-1][1]:

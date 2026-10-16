@@ -20,7 +20,8 @@ Things we don't know yet, roughly in priority order. If you figure one out, move
 - [x] Reject extreme closed-duration outliers using a well-sampled unnamed pattern's own median and upper tail (2026-10-16, findings.md); sparse/broad histories remain ambiguous.
 - [x] Size surge starts by covered pre/settled leg power; cluster and pair by running size, retaining run/pattern `inrush_w` (2026-10-16, findings.md).
 - [x] Bounded compound offs: when no single run matches, try up to 12 recent open runs on the same legs; expose `closed_by="shared-off"` (2026-10-16, findings.md).
-- [ ] Pool-pump replay: the 14:28:10 off already matches a supported 1078.5 W single from 13:05:12, which must win. Salt's settled window lacks coverage, retaining 536.9 W, and it closes singly at 13:05:23. The 901 W pump is also outside the 12-candidate cap. Validate sizing/earlier pairing and candidate retrieval against more labeled data; see findings.md.
+- [x] Recover the pool-pump replay: baseline-relative evidence rejects the stale 13:05 single, and 20% surge tolerance closes the 901 W pump singly at 14:28:10 (2026-10-16, round 3 in findings.md).
+- [ ] Validate against more labeled data: salt's settled window lacks coverage, and small shared closures remain questionable during program chatter despite the ten-minute start-gap limit; see round 3 in findings.md.
 - [ ] Multi-step offs: some loads (a 240 V dryer here) switch on in one step and off in several partial steps;
       those runs stay "unresolved" (counted, no duration/energy). Needs subset-sum style closing.
 - [ ] Same device split across two patterns when its step size varies (e.g. 47 W and 56 W, both ~13 s on L1).

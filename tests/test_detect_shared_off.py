@@ -3,7 +3,7 @@
 import pytest
 
 from senseless import detect
-from senseless.detect import MAX_RUN_S, SHARED_OFF_CAP, Step, pair_runs
+from senseless.detect import MAX_RUN_S, SHARED_OFF_CAP, SHARED_START_S, Step, pair_runs
 
 
 def step(t, w, legs="L2"):
@@ -23,6 +23,41 @@ def test_two_load_timer_closes_both_and_serializes_shared_off(legs):
         assert run.duration_s(3601) == duration
         assert run.as_dict(3601)["closed_by"] == "shared-off"
         assert run.as_dict(3601)["wh"] == round(run.w * duration / 3600, 2)
+
+
+@pytest.mark.parametrize("gap,closes", [(55, True), (SHARED_START_S, True),
+                                      (SHARED_START_S + 1 / 60, False)])
+def test_shared_off_requires_nearby_start_frames(gap, closes):
+    steps = [step(0, 700), step(gap, 300), step(1000, -1000)]
+    # Frame counters govern pairing even if receive timestamps are distorted.
+    steps[1].ts = 1
+    runs = pair_runs(steps, 1001)
+    assert all(r.closed_by == "shared-off" and r.end_ts == 1000 for r in runs) is closes
+
+
+@pytest.mark.parametrize("low,closes", [(2100, False), (2900, True)])
+def test_shared_off_checks_baseline_relative_individual_and_overlap_power(low, closes):
+    # The absolute 1003 W summed floor alone cannot disprove the stale pair.
+    rs = power(210, lambda t: 2000 if t < 30 else 2900 if t < 85 else
+               low if 120 <= t < 160 else 3180)
+    runs = pair_runs([step(30, 900), step(85, 280), step(200, -1180)], 210, rs)
+    assert all(r.closed_by == "shared-off" and r.end_ts == 200 for r in runs) is closes
+
+
+def test_shared_sum_uses_earlier_baseline_without_double_counting_older_load():
+    rs = power(210, lambda t: 1000 if t < 30 else 1900 if t < 85 else 2180)
+    runs = pair_runs([step(30, 900), step(85, 280), step(200, -1180)], 210, rs)
+    assert all(r.closed_by == "shared-off" for r in runs)
+
+
+def test_shared_overlap_is_rejected_even_when_each_relative_floor_is_supported():
+    rs = power(210, lambda t: 2000 if t < 30 else 2900 if t < 85 else
+               2650 if 120 <= t < 160 else 3180)
+    # Individual floors: 2465 and 2838. Make the newer pre unavailable so its
+    # absolute floor is supported; combined floor from the older pre is 2703.
+    rs = [r for r in rs if not 73 <= r["ts"] < 83]
+    runs = pair_runs([step(30, 900), step(85, 280), step(200, -1180)], 210, rs)
+    assert all(r.closed_by is None for r in runs)
 
 
 def test_single_matching_run_wins_even_when_pair_is_more_exact():

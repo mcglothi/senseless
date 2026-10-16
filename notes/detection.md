@@ -27,11 +27,13 @@ case on hardware. The microwave observations are verified against captured traff
 Each positive step starts a run. Each negative step first tries one open run:
 the most recent compatible on-step on exactly the same legs. The size test is
 `abs(on_w - abs(off_w)) <= max(0.15 * on_w, 20 W)`
-(`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). A single compatible, power-supported
+(`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). Runs with `inrush_w` set instead allow
+`max(0.20 * on_w, 20 W)` because settled sizing is an estimate. A single compatible, power-supported
 run always wins over a pair.
 
 If there is no single match, try pairs among the 12 most recent open runs on
-exactly those legs, each started within `MAX_RUN_S`. Compare the summed run
+exactly those legs, each started within `MAX_RUN_S`, and whose starts are at most
+`SHARED_START_S = 600 s` apart (using frame counters). Compare the summed run
 watts to the off with the same `max(0.15 * sum_w, 20 W)` tolerance. Power must
 support each run throughout its own duration and their sum during their overlap,
 using the sustained-power evidence rules below. Prefer the smallest gap between
@@ -68,18 +70,25 @@ rise instead of the monitor's reported startup surge:
   leave `inrush_w` null. Preserve the reported `stages` in either case.
 
 Pairing, sustained-power checks, pattern clustering and estimated energy all use
-the adjusted `w`. The existing pairing tolerance and six-hour limit still apply.
-`Detector.recompute` loads one-second means in SQL only around eligible starts,
+the adjusted `w`. Plain runs keep 15% pairing tolerance; surge-sized runs allow
+20%. The six-hour limit still applies.
+`Detector.recompute` loads one-second baseline means in SQL for every on, plus settled means for eligible starts,
 coalescing overlapping windows and using the `(generation, frame)` index. The
 five-second maxima used below and cycle energy bins remain unchanged. Raw-reading
 replays/tests compute the same one-second means in Python. Supplying only coarse
 five-second bins without startup means skips adjustment; delta-only databases and
 missing startup readings also retain the original size.
 
-When readings are available, sustained power below the on-size minus that tolerance
-retires the on as `unresolved` before matching an off. A completed newer compatible
+When a covered pre-start mean is available (the same first-stage −12 s to −2 s
+window used for sizing), sustained power below `pre + 0.85 * run.w - 300 W`
+retires the on as `unresolved` before matching an off. The 300 W slack allows
+other background loads to switch off. Without a covered baseline, retain the
+absolute `run.w - max(0.15 * run.w, 20 W)` floor, including for surge-sized runs.
+A completed newer compatible
 cycle also retires older candidates if power during their supposed overlap cannot
-support both loads. Evidence uses maxima in fully covered five-second bins, skips
+support both loads. Shared-off matching checks each run and their combined overlap;
+combined checks use the earlier start's baseline and the later start's interval,
+so the older load is counted once. Evidence uses maxima in fully covered five-second bins, skips
 startup/stages and off transitions, and stays within a frame-counter generation.
 Missing data and isolated dips do not reject runs. For `both`, use total leg power.
 No off time is invented; retired runs contribute zero duration/energy and cannot
@@ -196,9 +205,11 @@ the pattern ID and assignment depend on the other runs and saved patterns.
 - Settled sizing is a background-subtracted heuristic, not proof of a motor or
   device identity. Unreported background changes and small switching below the
   overlap threshold can distort the rise, including creating a false small run
-  from a surge-shaped delta with no sustained load. The pool replay still fails
-  pairing at 901 W versus a 1054 W off, outside 15%; see the dated
-  [replay findings](findings.md#2026-10-16-settled-level-inrush-sizing-replay).
+  from a surge-shaped delta with no sustained load. Baseline-relative floors and
+  20% surge pairing recover the 901 W pool replay against its 1054 W off; see the
+  [round 3 findings](findings.md#2026-10-16-baseline-relative-evidence-replay-round-3).
+  The 300 W allowance makes small-load evidence weak, and shared closures during
+  program chatter can still be questionable even with nearby starts.
 - Multi-step offs do not combine. A load whose total off arrives as several
   smaller drops may never close. It can become unresolved and later expire.
 - One appliance can split across patterns when its on-size changes by more than
