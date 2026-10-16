@@ -75,7 +75,11 @@ members. All rows remain available and nameable; an inbox client can hide flagge
 fragments and offer an expanded view. The frontend has not yet adopted this flag.
 Run fields are `generation`, `start_frame`, `start_ts`, `end_frame`, `end_ts`,
 `legs`, `w`, `inrush_w`, `off_w`, `stages`, `duration_s`, `running`, `status`, `wh`, `pattern`,
-`cycle` (cycle ID string or null).
+`cycle` (cycle ID string or null), `closed_by`.
+Run `closed_by` is `"shared-off"` when two runs switched off together at one
+observed off; otherwise null. Both runs retain that off's full `off_w`; do not
+sum those values as separate measured offs. Each run's `wh` uses its own size
+and duration.
 Run `inrush_w` is the monitor's reported on-size when covered pre/settled readings
 identify a startup surge; otherwise null. `w`, pairing and `wh` then use the
 settled rise. `stages` retain the original reported watts. See

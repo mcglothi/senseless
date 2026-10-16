@@ -8,7 +8,8 @@ Pipeline, recomputed over a sliding window (cheap: a few thousand deltas a day):
    (a microwave: +299 W, then +1,726 W 90 cycles later).
 3. **Runs**: covered pre/settled leg means size surge starts by their running level. An
    "off" step closes the most recent compatible "on" on the same legs (size
-   within PAIR_TOL), unless sustained leg power disproves it. Missed offs become unresolved.
+   within PAIR_TOL), then tries a bounded pair sharing that off. Sustained leg power can
+   disprove either match. Missed offs become unresolved.
 4. **Patterns**: runs are grouped by legs + stage count + size; a run joins the nearest known
    pattern centre within CLUSTER_TOL, else starts a new one. Patterns and their names persist in
    settings.db, so names survive recomputes and restarts. Extreme duration outliers in well-sampled,
@@ -21,8 +22,10 @@ import sqlite3
 import threading
 import time
 from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from itertools import islice
 from pathlib import Path
 from statistics import median
 
@@ -31,6 +34,7 @@ PAIR_240_TOL = 0.25      # L1/L2 size mismatch allowed for one 240 V step
 STAGE_FRAMES = 120       # 2 s at 60 Hz (microwave stages: 90 cycles apart)
 PAIR_TOL = 0.15          # off step within 15% (or PAIR_ABS_W) of the on step
 PAIR_ABS_W = 20
+SHARED_OFF_CAP = 12      # at most 66 pairs per unmatched off; 0 disables shared offs
 MAX_RUN_S = 6 * 3600
 CLUSTER_TOL = 0.12
 WINDOW_S = 48 * 3600
@@ -68,6 +72,7 @@ class Run:
     generation: int = 0
     cycle: str | None = None
     inrush_w: float | None = None  # reported on-size when w was adjusted to the settled rise
+    closed_by: str | None = None  # "shared-off" when two runs share one observed off
 
     @property
     def running(self) -> bool:
@@ -84,6 +89,7 @@ class Run:
         return {"generation": self.generation, "start_frame": self.start_frame, "start_ts": self.start_ts, "end_frame": self.end_frame,
                 "end_ts": self.end_ts, "legs": self.legs, "w": round(self.w, 1), "off_w": self.off_w,
                 "inrush_w": round(self.inrush_w, 1) if self.inrush_w is not None else None,
+                "closed_by": self.closed_by,
                 "stages": self.stages, "duration_s": round(d, 1), "running": self.running, "status": self.status,
                 "wh": round(self.w * d / 3600, 2), "pattern": self.pattern, "cycle": self.cycle}
 
@@ -287,7 +293,7 @@ class PowerEvidence:
 
 def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = None,
               keep_expired: bool = False, *, startup_readings: list[dict] | None = None) -> list[Run]:
-    """Close each off with the most recent compatible open on (same legs, size within tolerance).
+    """Close each off with one compatible on, falling back to a bounded pair on the same legs.
     Open runs are indexed by legs and 5 W size bucket, so an off only looks at sizes it could match:
     thousands of unmatched ons (missed offs, noise) stay linear instead of quadratic.
     When readings are available, a sustained power floor below an on's size
@@ -300,29 +306,38 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
     means = startup_readings if startup_readings is not None else readings or []
     sizes = StartupPower(means).sizes(steps) if means and "bin_start" not in means[0] else {}
     open_by: dict[str, dict[int, list[tuple[int, Run]]]] = {}
+    # Linked order keeps a capped reverse traversal O(cap), even after thousands
+    # of newer starts close and leave only old unmatched ons behind.
+    recent: dict[str, OrderedDict[int, Run]] = {}
     for s in steps:
         if s.w > 0:
             w = sizes.get(id(s), s.w)
             r = Run(s.frame, s.ts, s.legs, w, s.stages or [(0, round(s.w, 1))], status="running",
                     inrush_w=s.w if id(s) in sizes else None)
             open_by.setdefault(s.legs, {}).setdefault(int(w // BUCKET_W), []).append((len(runs), r))
+            recent.setdefault(s.legs, OrderedDict())[len(runs)] = r
             runs.append(r)
             continue
         x = abs(s.w)
         # every on size that _compatible() could accept for this off
         lo, hi = min(x / (1 + PAIR_TOL), x - PAIR_ABS_W), max(x / (1 - PAIR_TOL), x + PAIR_ABS_W)
         buckets = open_by.get(s.legs, {})
+        opened = recent.get(s.legs, {})
         best = None
         for b in range(int(max(lo, 0) // BUCKET_W), int(hi // BUCKET_W) + 1):
             lst = buckets.get(b)
             if not lst:
                 continue
             # ons older than MAX_RUN_S can't be closed any more (their off was missed): drop them
+            for i, r in lst:
+                if s.ts - r.start_ts > MAX_RUN_S:
+                    opened.pop(i, None)
             lst[:] = [(i, r) for i, r in lst if s.ts - r.start_ts <= MAX_RUN_S]
             for i, r in reversed(lst):
                 if _compatible(r, s):
                     if power is not None and power.contradicts(r, s.frame):
                         r.status = "unresolved"
+                        opened.pop(i, None)
                         continue
                     if best is None or i > best[0]:
                         best = (i, r, b)
@@ -332,18 +347,49 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
             i, r, b = best
             r.end_frame, r.end_ts, r.off_w, r.status = s.frame, s.ts, round(s.w, 1), "closed"
             buckets[b].remove((i, r))
+            opened.pop(i, None)
             if power is not None:
                 # A completed newer cycle can disprove an older similar on:
                 # during their supposed overlap the leg must support BOTH loads.
                 # Retire the stale candidate, never manufacture an off for it.
                 for b in range(int(max(lo, 0) // BUCKET_W), int(hi // BUCKET_W) + 1):
                     lst = buckets.get(b, [])
-                    for _, older in lst:
+                    for j, older in lst:
                         if older.start_frame < r.start_frame and _compatible(older, s):
                             floor = older.w - max(PAIR_TOL * older.w, PAIR_ABS_W)
                             if power.contradicts(r, s.frame, extra_floor=floor):
                                 older.status = "unresolved"
+                                opened.pop(j, None)
                     lst[:] = [(j, older) for j, older in lst if older.running]
+        else:
+            candidates = []
+            for i, r in islice(reversed(opened.items()), SHARED_OFF_CAP):
+                if s.ts - r.start_ts > MAX_RUN_S:
+                    break
+                candidates.append((i, r))
+            pair, rank = None, None
+            for a, (i, newer) in enumerate(candidates):
+                for j, older in candidates[a + 1:]:
+                    total = newer.w + older.w
+                    error = abs(total - x)
+                    if error > max(PAIR_TOL * total, PAIR_ABS_W):
+                        continue
+                    if power is not None and (
+                        power.contradicts(older, s.frame) or power.contradicts(newer, s.frame) or
+                        # The overlap must support their summed load, with the
+                        # same tolerance as a single load of that size.
+                        power.contradicts(replace(newer, w=total), s.frame)
+                    ):
+                        continue
+                    score = (abs(newer.start_frame - older.start_frame), error)
+                    if rank is None or score < rank:
+                        pair, rank = ((i, newer), (j, older)), score
+            if pair is not None:
+                for i, r in pair:
+                    r.end_frame, r.end_ts, r.off_w, r.status = s.frame, s.ts, round(s.w, 1), "closed"
+                    r.closed_by = "shared-off"
+                    buckets[int(r.w // BUCKET_W)].remove((i, r))
+                    opened.pop(i)
     # Pairing still expires at six hours. The cycle pipeline retains old unresolved
     # starts for 48-hour activity/membership; standalone run detection drops them.
     if keep_expired:
@@ -392,6 +438,7 @@ def resolve_closed_runs(runs: list[Run], now_ts: float, named: set[int]) -> None
             return
         for r in rejected:
             r.end_frame = r.end_ts = r.off_w = None
+            r.closed_by = None
             r.status = "unresolved"
 
 

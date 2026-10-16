@@ -67,6 +67,12 @@ def run_key(run: Run):
     return run.generation, run.start_frame, run.legs
 
 
+def _individually_closed(run: Run):
+    # A shared off is weaker evidence for a repeatable individual load. Keep
+    # those fragments eligible for program envelopes, including the final step.
+    return run.status == "closed" and run.closed_by != "shared-off"
+
+
 def chatter_patterns(runs, patterns, now_ts):
     """Hunt's frequency/closed-median/size rule, using this recompute's runs."""
     grouped = defaultdict(list)
@@ -75,7 +81,7 @@ def chatter_patterns(runs, patterns, now_ts):
     out = set()
     for p in patterns:
         rs = grouped[p["id"]]
-        ds = sorted(r.duration_s(now_ts) for r in rs if r.status == "closed")
+        ds = sorted(r.duration_s(now_ts) for r in rs if _individually_closed(r))
         if p["legs"] in ("L1", "L2") and len(rs) >= CHATTER_MIN_RUNS and ds and \
                 ds[len(ds) // 2] <= CHATTER_MAX_S and p["center_w"] <= CHATTER_MAX_W:
             out.add(p["id"])
@@ -127,7 +133,7 @@ def detect_cycles(deltas, runs, patterns, readings, now_ts):
     # in mixed, mostly-unpaired program shapes are weaker evidence: the real wash
     # has such pairings across its pause, and dropping all of them splits it.
     reliable = {pid for pid, rs in grouped.items()
-                if sum(r.status == "closed" for r in rs) >= max(MIN_RELIABLE_CLOSURES,
+                if sum(_individually_closed(r) for r in rs) >= max(MIN_RELIABLE_CLOSURES,
                                                                RELIABLE_CLOSED_SHARE * len(rs))}
     lookup = {run_key(r): r for r in runs}
     by_gen, power_by_gen = defaultdict(list), defaultdict(list)
@@ -145,7 +151,7 @@ def detect_cycles(deltas, runs, patterns, readings, now_ts):
         for s in steps:
             run = lookup.get((gen, s.frame, s.legs))
             if s.w >= MIN_STEP_W and run is not None and run.pattern not in excluded and \
-                    not (run.status == "closed" and run.pattern in reliable):
+                    not (_individually_closed(run) and run.pattern in reliable):
                 candidates[s.legs].append((s, run))
         for legs, ss in candidates.items():
             bursts = []
@@ -159,7 +165,7 @@ def detect_cycles(deltas, runs, patterns, readings, now_ts):
                 if len(burst) < MIN_STEPS or not MIN_DURATION_S <= duration <= MAX_DURATION_S:
                     continue
                 rate = len(burst) * 60 / duration
-                unpaired = sum(r.status != "closed" for _, r in burst) / len(burst)
+                unpaired = sum(not _individually_closed(r) for _, r in burst) / len(burst)
                 if rate < MIN_STEP_RATE or unpaired < MIN_UNPAIRED_SHARE:
                     continue
                 measured = power.measure(first.frame, last.frame, legs)
@@ -171,7 +177,7 @@ def detect_cycles(deltas, runs, patterns, readings, now_ts):
                               any(s.legs == legs and first.frame <= s.frame <= last.frame and s.w >= 1000
                                   for s in steps))
                 for _, r in burst:
-                    if r.status == "closed":
+                    if _individually_closed(r):
                         continue
                     r.cycle = cycle.id
                     cycle.member_run_keys.append(run_key(r))

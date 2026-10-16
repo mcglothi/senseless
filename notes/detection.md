@@ -24,10 +24,31 @@ case on hardware. The microwave observations are verified against captured traff
 
 ## Steps to runs
 
-Each positive step starts a run. Each negative step closes at most one open run:
+Each positive step starts a run. Each negative step first tries one open run:
 the most recent compatible on-step on exactly the same legs. The size test is
 `abs(on_w - abs(off_w)) <= max(0.15 * on_w, 20 W)`
-(`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). An unmatched off is discarded.
+(`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). A single compatible, power-supported
+run always wins over a pair.
+
+If there is no single match, try pairs among the 12 most recent open runs on
+exactly those legs, each started within `MAX_RUN_S`. Compare the summed run
+watts to the off with the same `max(0.15 * sum_w, 20 W)` tolerance. Power must
+support each run throughout its own duration and their sum during their overlap,
+using the sustained-power evidence rules below. Prefer the smallest gap between
+start frames, then the smallest absolute watt error; remaining ties favor recent
+starts. Both runs end at that off and serialize `closed_by: "shared-off"`, meaning
+"switched off together"; otherwise `closed_by` is null. Each retains the full
+observed `off_w`, not an apportioned share. Energy uses each run's own watts and
+duration. Rejected duration outliers clear `closed_by` along with their end.
+
+The existing size buckets serve single matching; a separate ordered open index
+makes the pair fallback examine at most 66 pairs per off, without scanning all
+unresolved starts. `SHARED_OFF_CAP = 0` disables the fallback for falsification.
+An unmatched off is discarded. A long-running load outside the most recent 12
+cannot close through this fallback, even if an older pair could explain the off.
+This is a bounded heuristic, not proof of appliance identity. Shared closures
+remain weak individual-load evidence in cycle detection: they do not establish
+clean repeated closures or chatter, or remove program fragments from envelopes.
 
 Before pairing, an on-step of at least 300 W can be sized by its settled power
 rise instead of the monitor's reported startup surge:

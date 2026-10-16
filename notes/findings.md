@@ -154,6 +154,77 @@ From 5 minutes of feed in one house:
   mixed program patterns include incidental pairings across a pause. Membership
   nevertheless uses only unclosed supporting candidates. See [cycles.md](cycles.md).
 
+## 2026-10-16: Bounded shared-off pairing replay (round 2)
+
+- **Verified against the same local scratch traffic through `Detector` and
+  temporary SQLite databases:** 5,655 deltas over 02:33:39–14:33:08 and
+  45,462 readings over 08:03:02–14:33:08. Compared `SHARED_OFF_CAP=0` with
+  12, preserving settled-level sizing. No captures or account identifiers were
+  added to the repository. Appliance labels below are supplied by the operator.
+- **The requested pool recovery is falsified on these captures.** The −1,054.2 W
+  off at 14:28:10 already closes a power-supported **1,078.5 W** single started
+  at **13:05:12**, both with shared offs enabled and disabled. The mandated
+  single-match priority prevents pair fallback at this off.
+- Independently, the salt start is merged from +61.1 W at **08:31:53** and
+  +475.7 W two seconds later. Its settled window has no coverage: the recordings
+  stop at 08:31:59 and resume at 08:33:16. Existing sizing therefore correctly
+  retains **536.9 W**, not the operator's roughly 280 W estimate. That run closes
+  singly at **13:05:23** (−556.1 W), long before the timer off. A 901.1 + 536.9 W
+  pair would not satisfy the unchanged summed-size tolerance anyway.
+- The **901.1 W** pool start at **08:31:00** remains unresolved and expires
+  from public runs after six hours. At the timer off it is **299th newest**
+  among **305** indexed open L2 starts, outside the fallback's 12-run cap.
+  Its hypothetical duration to 14:28:10 is 21,429.5 s, or **5,364.0 Wh**;
+  that is a labeled expectation, **not recovered runtime/energy**. Recovering
+  this example needs a separately validated refinement to sizing, competing
+  single matches and candidate retrieval; compound offs alone do not establish it.
+- Raw pairing produces **44 shared-off run closures at 22 off events**.
+  Duration-outlier rejection removes one closure and clears its provenance;
+  `Detector` exposes **43 surviving shared-off runs at 22 events**. Public run
+  count changes **1,696 → 1,704**; disabling the fallback yields zero shared
+  closures and restores the baseline. Each shared run exposes
+  `closed_by="shared-off"` and keeps the full observed off watts.
+- **Spot checks, not appliance identifications:** L1 starts at 14:31:12 and
+  14:31:15 (37.9 + 91.7 = 129.6 W) close at 14:31:28 (−129.4 W); covered
+  pre/post leg means fall 126.8 W, a plausible shared switch. L2 11:05:39 and
+  11:06:57 (133.8 + 1,146.3 = 1,280.1 W) close at 11:07:25 (−1,463.4 W),
+  within 192.0 W tolerance; covered means fall 1,234.3 W. Two small L1 pairs
+  closing at 08:44:59 and 08:45:19 also fit step sizes, but covered pre/post
+  means rise 8.6 and 25.4 W amid program chatter. Those are questionable
+  attributions: absolute power floors cannot establish load identity against
+  a changing background. Earlier overnight matches lack reading coverage.
+- The probable **well pump is unchanged:** both legs, **793.1 W**,
+  **13:13:12–13:15:33**, **140.5 s**, **30.95 Wh**. All **22 dryer-element
+  runs** retain sizes, ends, statuses, durations and energy, **2,840.49 Wh**
+  total. Fresh settings databases can allocate different numeric pattern IDs
+  when additional old starts are recovered.
+- Shared closure is weaker evidence of an individually repeatable load in
+  cycle detection. Excluding shared closures from clean-closure/chatter tests
+  preserves the washer's ID, **08:19:38–09:06:00** envelope, peak, duration
+  and **219.18 Wh**. Fingerprint/membership metadata is not identical: candidates
+  **115 → 116**, step rate **2.4802 → 2.5018/min**, median candidate size
+  **441.81 → 441.50 W**, and supporting members **108 → 109**. Without this
+  safeguard the end shifts 16 s earlier and energy drops to 216.38 Wh. No new
+  L2/both program envelopes appear.
+- **Validation:** 18 synthetic shared-off cases plus a cycle-envelope regression;
+  focused shared-off/cycle suites **52 passed**. Disabling the fallback makes
+  all **7 selected positive shared-off regressions fail**. Full requested
+  `uv sync -q && .venv/bin/python -m pytest -q` (with a writable temporary uv
+  cache) yields **526 passed, 12 failed**, all failures from sandbox-denied
+  socket binds, matching the preceding round's environment limitation. Failed
+  tests are `test_api.py::{test_stream_delivers_snapshot_then_events,
+  test_shutdown_is_prompt_with_an_open_stream,test_series_and_deltas_accept_windows,
+  test_circuits_api}`, `test_billing.py::{test_billing_api,
+  test_today_cost_uses_the_tariff}`, `test_detect.py::test_loads_api_name_and_ignore`,
+  `test_floorplans.py::{test_http_api,test_http_write_security_and_upload_limits}`,
+  `test_history.py::test_history_endpoint`, and
+  `test_hunt.py::{test_hunt_api_long_poll_and_label_to_room,
+  test_stream_snapshot_carries_hunt}`.
+- **Benchmark:** supplied `scratchpad/perf/bench.py`, **333,832 readings /
+  22,864 deltas**, **1.17 / 1.19 / 1.19 s**, maximum RSS approximately
+  **108 MB**. Each unmatched off examines at most 66 pairs; the ordered index
+  avoids scans through thousands of unresolved or previously closed starts.
+
 ## 2026-10-16: Settled-level inrush sizing replay
 
 - **Verified against local scratch traffic by replay through `Detector` and a

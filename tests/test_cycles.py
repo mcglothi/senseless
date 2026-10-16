@@ -73,6 +73,17 @@ def test_dishwasher_heater_is_part_of_program(tmp_path):
     assert len(found) == 1 and found[0].has_heat
 
 
+def test_shared_off_fragments_preserve_program_envelope(tmp_path):
+    ds, rs = program()
+    found, runs, patterns = run_pipeline(tmp_path, ds, rs)
+    baseline, = found
+    for r in runs:
+        r.end_frame, r.end_ts = r.start_frame + 600, r.start_ts + 10
+        r.status, r.closed_by = "closed", "shared-off"
+    shared, = cycles.detect_cycles(ds, runs, patterns.all(), rs, 3100)
+    assert shared.as_dict() == baseline.as_dict()
+
+
 @pytest.mark.parametrize("case", ["flat", "wrong_leg", "no_baseline", "sparse", "null", "nan", "other_generation", "no_readings"])
 def test_power_must_confirm_with_covered_baseline_and_correct_leg(tmp_path, case):
     ds, rs = program()
