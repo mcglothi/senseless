@@ -294,8 +294,17 @@ class Detector:
         self.runs, self.computed_at = runs, now_ts
 
     def runs_since(self, since_ts: float) -> list[dict]:
+        return self.runs_between(since_ts, time.time() + 1)
+
+    def runs_between(self, start: float, end: float) -> list[dict]:
+        """Runs overlapping [start, end); unresolved runs have no known end, so only their start counts."""
         now = time.time()
-        return [r.as_dict(now) for r in self.runs if (r.end_ts or now) >= since_ts]
+        out = []
+        for r in self.runs:
+            stop = r.end_ts if r.end_ts is not None else (now if r.running else r.start_ts)
+            if r.start_ts < end and stop >= start:
+                out.append(r.as_dict(now))
+        return out
 
     def loads(self, day_start: float) -> list[dict]:
         """Every pattern seen in the window with today's stats, most energy first."""

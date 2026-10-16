@@ -68,6 +68,23 @@ def _query(db_path: Path, sql: str, args=()) -> list[dict]:
         db.close()
 
 
+def _window(req: web.Request, default_minutes: float, cap_minutes: float) -> tuple[float, float]:
+    """[start, end) in unix seconds from ?start=&end= (epoch s) or ?minutes= back from now. Capped span."""
+    q = req.query
+    try:
+        if "start" in q or "end" in q:
+            end = float(q.get("end", time.time()))
+            start = float(q.get("start", end - default_minutes * 60))
+        else:
+            end = time.time()
+            start = end - _minutes(req, default_minutes, cap_minutes) * 60
+    except ValueError:
+        raise web.HTTPBadRequest(text="start/end must be unix seconds")
+    if end <= start:
+        raise web.HTTPBadRequest(text="end must be after start")
+    return max(start, end - cap_minutes * 60), end
+
+
 def _minutes(req: web.Request, default: float = 10, cap: float = 24 * 60) -> float:
     try:
         return min(float(req.query.get("minutes", default)), cap)
@@ -137,8 +154,9 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         })
 
     async def deltas(req):
-        since = time.time() - _minutes(req) * 60
-        return web.json_response(_query(db_path, "SELECT ts, start_frame, frame, channel, w FROM deltas WHERE ts > ? ORDER BY start_frame", (since,)))
+        start, end = _window(req, 10, 24 * 60)
+        return web.json_response(_query(db_path, "SELECT ts, start_frame, frame, channel, w FROM deltas WHERE ts >= ? AND ts < ? ORDER BY start_frame",
+                                        (start, end)))
 
     async def readings(req):
         since = time.time() - _minutes(req, 10, 6 * 60) * 60
@@ -149,12 +167,14 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         return web.json_response(await asyncio.to_thread(summary.today, db_path, cost))
 
     async def series(req):
-        minutes = _minutes(req, 30, 24 * 60)
+        start, end = _window(req, 30, 7 * 24 * 60)
         try:
             bucket = min(max(float(req.query.get("bucket", 10)), 1), 3600)
         except ValueError:
             raise web.HTTPBadRequest(text="bucket must be a number")
-        return web.json_response(await asyncio.to_thread(summary.series, db_path, minutes, bucket))
+        if (end - start) / bucket > 5000:  # keep responses chart-sized
+            bucket = (end - start) / 5000
+        return web.json_response(await asyncio.to_thread(summary.series, db_path, start, end, bucket))
 
     async def stream(req):
         """Server-sent events: a snapshot, then every realtime update / timeline event as it arrives."""
@@ -254,8 +274,8 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         return web.json_response({"computed_at": d.computed_at, "patterns": d.loads(start)})
 
     async def runs(req):
-        since = time.time() - _minutes(req, 180, 48 * 60) * 60
-        return web.json_response(_det().runs_since(since))
+        start, end = _window(req, 180, 48 * 60)
+        return web.json_response(_det().runs_between(start, end))
 
     async def load_name(req):
         body = await _body(req)

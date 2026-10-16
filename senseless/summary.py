@@ -70,18 +70,17 @@ def today(db_path: Path, cost_cents_per_kwh: float | None, now: float | None = N
     }
 
 
-def series(db_path: Path, minutes: float, bucket_s: float) -> list[dict]:
-    """Per-leg power averaged into fixed buckets, for charts (one row per bucket with data)."""
-    since = time.time() - minutes * 60
+def series(db_path: Path, start: float, end: float, bucket_s: float) -> list[dict]:
+    """Per-leg power averaged into fixed buckets over [start, end), for charts (one row per bucket with data).
+    Also min/max per bucket, so zoomed-out charts still show short spikes."""
     db = _connect(db_path)
     try:
         rows = db.execute(
-            "SELECT CAST(ts / ? AS INTEGER) * ? AS t, avg(w) AS w, avg(l1_w) AS l1, avg(l2_w) AS l2 "
-            "FROM readings WHERE ts >= ? GROUP BY CAST(ts / ? AS INTEGER) ORDER BY t",
-            (bucket_s, bucket_s, since, bucket_s),
+            "SELECT CAST(ts / ? AS INTEGER) * ? AS t, avg(w) AS w, avg(l1_w) AS l1, avg(l2_w) AS l2, max(w) AS w_max "
+            "FROM readings WHERE ts >= ? AND ts < ? GROUP BY CAST(ts / ? AS INTEGER) ORDER BY t",
+            (bucket_s, bucket_s, start, end, bucket_s),
         ).fetchall()
     finally:
         db.close()
-    return [{"t": r["t"], "w": round(r["w"], 1) if r["w"] is not None else None,
-             "l1": round(r["l1"], 1) if r["l1"] is not None else None,
-             "l2": round(r["l2"], 1) if r["l2"] is not None else None} for r in rows]
+    rnd = lambda v: round(v, 1) if v is not None else None
+    return [{"t": r["t"], "w": rnd(r["w"]), "l1": rnd(r["l1"]), "l2": rnd(r["l2"]), "w_max": rnd(r["w_max"])} for r in rows]

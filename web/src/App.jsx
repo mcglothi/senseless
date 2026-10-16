@@ -10,6 +10,7 @@ import { busyTyping } from './api/api'
 import { useLocation } from './router'
 import { NowView } from './views/Now/NowView'
 import { LoadsView } from './views/Loads/LoadsView'
+import { TimelineView } from './views/Timeline/TimelineView'
 import { useLoads } from './hooks/useLoads'
 
 export default function App() {
@@ -45,9 +46,9 @@ export default function App() {
         onOpenAppearance={() => setAppearanceOpen(true)} onToggleMode={toggleMode} />
       <AppearanceDrawer open={appearanceOpen} onClose={() => setAppearanceOpen(false)} appearance={appearance} />
       <main style={{ width: '100%', maxWidth: 1440, margin: '0 auto', padding: isMobile ? sp(14) : `${sp(22)}px ${sp(28)}px ${sp(40)}px` }}>
-        {path === '/' ? <NowView live={live} today={today} loads={loads} /> : path === '/loads' ? <LoadsView loads={loads} /> : (
+        {path === '/' ? <NowView live={live} today={today} loads={loads} /> : path === '/loads' ? <LoadsView loads={loads} /> : path === '/timeline' ? <TimelineView loads={loads} /> : (
           <Empty title="Coming soon">
-            This view is on the roadmap (Timeline, History).
+            History is on the roadmap.
           </Empty>
         )}
       </main>
