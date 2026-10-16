@@ -44,10 +44,21 @@ Things we don't know yet, roughly in priority order. If you figure one out, move
 The monitor samples at ~MHz rates and streams only processed results to Sense's cloud. Everything above
 still depends on Sense's servers. Long-term questions:
 
-- [ ] What does the monitor say on the LAN? (mDNS, open ports, what it connects to.)
-- [ ] Can its cloud connection be intercepted (TLS details, pinning on the device side)?
-- [ ] Hardware: SoC, debug headers (UART/JTAG), firmware extraction. ⚠️ The monitor lives in the breaker
-      panel. De-energize and know what you're doing.
+- [x] What does the monitor say on the LAN? (2026-10-16, one home, Wi-Fi monitor, passive capture on the router.)
+      Nothing listens: top-1000 TCP ports filtered, top-30 UDP no response. Outbound it holds **one long-lived
+      TLS connection to AWS us-east-1 on :443**, ~2.8 KB/s each way (Sense's spec sheet says ~300 MB/day, which
+      matches). It also polls a Philips Hue bridge over plain HTTP (`GET /api/<key>/lights`, ~every 5 s) for
+      Sense's Hue integration. No mDNS/SSDP seen in 90 s. Capture point needs no extra hardware: any router you
+      can run `tcpdump` on sees all of it.
+- [ ] Can its cloud connection be intercepted (TLS details, pinning, client certificates)? Next: capture a
+      fresh handshake (SNI, cert chain, client-cert request) after a monitor reconnect.
+- [ ] What does it do with no internet? (Buffer and replay? Any local fallback?) Needs a deliberate outage test.
+- [ ] Hardware: SoC, debug headers (UART/JTAG), firmware extraction. Sense's spec sheet says a **1 GHz ARM
+      processor** (an application processor, so almost certainly embedded Linux). Forum posts say early monitors
+      used a TI ADC/DSP and newer ones NXP parts. No FCC filing to mine: Sense Labs (grantee 2AFZS) has no
+      indexed device filings, so the monitor likely uses a pre-certified Wi-Fi module (the label's
+      "Contains FCC ID" line would name it). Note: FCC ID 2ABAMSNSE "Sense" is Hello Inc.'s sleep tracker,
+      not this monitor. ⚠️ The monitor lives in the breaker panel. De-energize and know what you're doing.
 - [ ] Sense is pivoting to utility smart meters. What happens to consumer monitors if the cloud goes away?
 
 ## App
