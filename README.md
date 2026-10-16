@@ -31,11 +31,16 @@ Inspect per-leg power, steps, and detected runs together. Drag to zoom, pan thro
 ![Timeline view with power, steps, and detected runs](docs/screenshots/timeline.jpg)
 *Put a load's startup and shutdown alongside the house's power trace.*
 
-### Breaker Hunt
+### Hunt: breakers and devices
 
-Take your phone to the panel. Capture a baseline, switch off one breaker, and see the drop on each leg. Balanced drops flag a likely 240 V circuit. Save breaker numbers and names to build a map and track how much of the always-on load you have accounted for.
+Two modes, one toggle:
 
-<img src="docs/screenshots/hunt-phone.jpg" alt="Breaker Hunt on a phone" width="360">
+- **Breakers.** Take your phone to the panel. Capture a baseline, switch off one breaker, and see the drop on each leg. Balanced drops flag a likely 240 V circuit. Save breaker numbers and names to build a map and track how much of the always-on load you have accounted for.
+- **Devices.** Walk up to a device, tap start, and switch it on and off. Senseless measures each cycle from the monitor's own step detections and asks what it is. It offers ideas from the size and legs, from what Sense's own detection noticed, and from names you've already used. Naming it names the load pattern, so every future run carries the name; you can also pin it in a Map room. Small loads that cycle all day are ignored by default so they don't hijack the measurement.
+
+The hunt runs on the server, so a voice assistant can drive the same session through the API (`/api/hunt`, with a speakable `prompt` at every step) while the phone screen follows along. See [the API notes](notes/senseless-api.md#hunt-sessions-breaker-and-device).
+
+<img src="docs/screenshots/hunt-phone.jpg" alt="Hunt on a phone" width="360">
 
 *Live leg readings and a guided baseline → breaker → save flow.*
 

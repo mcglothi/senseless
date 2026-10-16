@@ -37,6 +37,7 @@ export function useLive() {
   const [series, setSeries] = useState([])
   const [deltas, setDeltas] = useState([])
   const [status, setStatus] = useState({ state: 'connecting', healthy: false })
+  const [hunt, setHunt] = useState(null)   // latest hunt session pushed by the server (see HuntView)
   const lastAt = useRef(0)
 
   useEffect(() => {
@@ -70,6 +71,8 @@ export function useLive() {
               .slice(-MAX_DELTAS))
           }
           setStatus(s => (s.state === 'live' && s.healthy ? s : { ...s, state: 'live', healthy: true }))
+        } else if (ev.type === 'hunt') {
+          setHunt(ev.hunt)   // one ordered stream: the newest event is the newest state
         } else if (ev.type === 'hello') {
           setStatus(s => ({ ...s, monitorOnline: ev.payload?.online }))
         }
@@ -89,7 +92,7 @@ export function useLive() {
     return () => { closed = true; clearTimeout(retry); clearInterval(watch); es?.close() }
   }, [])
 
-  return { latest, series, deltas, status }
+  return { latest, series, deltas, status, hunt }
 }
 
 // Senseless's own always-on baseline (each leg's 5th percentile over 24 h); refreshed every 5 min.

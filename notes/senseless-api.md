@@ -96,6 +96,54 @@ are rounded to one decimal. Appearance and circuit validation errors return
 400 with `{error}`. Their routes return 404 when the corresponding service is
 not configured. These settings, circuits and patterns live in `settings.db`.
 
+## Hunt sessions (breaker and device)
+
+One shared hunt session for the house lives on the server, so the app and any API client (a script,
+a voice assistant walking the house with you) drive and see the same thing. Every change is also pushed
+on `/api/stream` as `{"type": "hunt", "hunt": <view>}`. `GET /api` lists every endpoint with a one-line
+description, for agents discovering the API.
+
+| Method | Path | Parameters | Returns |
+|---|---|---|---|
+| GET | `/api/hunt` | optional `wait=<version>` long-polls until the session changes; `timeout` seconds (default 25, max 55) | The session view (below). On timeout, the unchanged view. |
+| POST | `/api/hunt/start` | JSON `{"mode": "breaker"\|"device", "include_background": false}` | The view. Restarts any running hunt. In breaker mode, also "next breaker" after a save. |
+| POST | `/api/hunt/save` | JSON `{"breaker": "14", "name": "Basement"}` | `{saved, hunt}`: breaker mode, stores the measured drop (same row as `POST /api/circuits`). |
+| POST | `/api/hunt/label` | JSON `{"name": "Microwave", "room_id": 7}` (`room_id` optional) | `{pattern, measurement, hunt}` and, with `room_id`, `marker`: device mode, names the measured load's pattern (created if new) and optionally pins it in a Map room. |
+| POST | `/api/hunt/retry` | none (empty body is fine) | Breaker: re-baseline. Device: discard the current measurement and wait for a fresh on. |
+| POST | `/api/hunt/stop` | none | The idle view. |
+
+Commands that don't fit the current phase return 409 with `{error, hunt}`. Empty-body POSTs are accepted,
+still subject to the same-origin rule below.
+
+Session view fields: `version`, `epoch` (server start; with `version`, orders views), `mode`, `phase`,
+`live`, `prompt` (one or two short sentences meant to be read aloud), `actions` (commands valid now),
+`note`, `last` (what the previous save/label stored), `baseline`, `noise_steps`. Breaker mode adds `drop`
+`{l1, l2, total, steps, both, meaningful}`. Device mode adds `on` (the switch-on being measured),
+`measurement` `{w, legs, stages, cycles, on_sizes, off_sizes, durations_s, consistent, sense_guess,
+ideas, matches}`, `capturing`, `ignoring` (background patterns skipped) and `ignored_steps`.
+
+Phases:
+
+- breaker: `idle` → `settling` (4 s) → `watching` (switch a breaker off; `drop` updates) → `save` →
+  `flipback` (switch it back on) → `start` again.
+- device: `idle` → `settling` → `ready` (waiting for an on step) → `on` (measured the on; waiting for the
+  matching off) → `measured` (a full cycle; switch again to confirm, or `label`). `label` returns to
+  `ready` for the next device. Only on-steps of at least 30 W count (the detector's floor). By default,
+  small loads that cycle all day (≥ 40 runs in 48 h, median on-time ≤ 10 min, ≤ 300 W) are ignored, so a
+  busy relay doesn't become "the device"; pass `include_background: true` to hunt one of those down.
+
+Voice assistant loop (illustrative):
+
+```text
+POST /api/hunt/start {"mode":"device"}           → say prompt
+loop: GET /api/hunt?wait=<version>                → when prompt changes, say it
+user: "it's the microwave, in the kitchen"        → POST /api/hunt/label {"name":"Microwave","room_id":<kitchen>}
+user: "that wasn't me" / "measure again"          → POST /api/hunt/retry
+user: "done"                                      → POST /api/hunt/stop
+```
+
+Room ids come from `GET /api/floors` (each floor's `rooms`).
+
 ## Floor plans
 
 Floors, rooms and markers live in `settings.db`; images in `<data dir>/floorplans/`. Coordinates are

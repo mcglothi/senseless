@@ -266,6 +266,27 @@ class Patterns:
                 raise KeyError(pattern_id)
             return dict(db.execute("SELECT * FROM patterns WHERE id=?", (pattern_id,)).fetchone())
 
+    def find_or_create(self, legs: str, stages: int, w: float) -> dict:
+        """The pattern a run of this shape would join (nearest centre within CLUSTER_TOL), created if
+        none exists yet. Device Hunt names it, so runs of a device never seen before still get the name."""
+        if legs not in ("L1", "L2", "both") or w < MIN_STEP_W:
+            raise ValueError("legs must be L1, L2 or both and w at least MIN_STEP_W")
+        stages = 2 if stages > 1 else 1
+        with self._conn() as db:
+            best, best_err = None, None
+            for p in self._snapshot(db):
+                if p["legs"] != legs or p["stages"] != stages:
+                    continue
+                err = abs(w - p["center_w"]) / p["center_w"]
+                if err <= CLUSTER_TOL and (best_err is None or err < best_err):
+                    best, best_err = p, err
+            if best is not None:
+                return best
+            now = time.time()
+            cur = db.execute("INSERT INTO patterns (legs, stages, center_w, n, created, last_seen) VALUES (?,?,?,?,?,?)",
+                             (legs, stages, round(w, 1), 0, now, now))
+            return dict(db.execute("SELECT * FROM patterns WHERE id=?", (cur.lastrowid,)).fetchone())
+
 
 def load_deltas(db_path: Path, since_ts: float) -> list[dict]:
     """Deltas in the window, all frame-counter generations (uses the ts index, not a scan)."""

@@ -25,6 +25,7 @@ from .circuits import Circuits
 from .floorplans import Floorplans
 from .detect import Detector
 from .history import History
+from .hunt import Hunt
 from .state import LiveState
 from .store import Store
 
@@ -87,6 +88,7 @@ class Collector:
         self.last_rt_mono = 0.0  # monotonic time of last realtime_update
         self.unhealthy_since = time.monotonic()
         self.stopping = asyncio.Event()
+        self.hunt: Hunt | None = None
 
     # ── message handling ────────────────────────────────────────────────────
     def handle(self, text: str, now: float) -> None:
@@ -104,6 +106,11 @@ class Collector:
                 st.publish({"type": "rt", "t": now, "w": p.get("w"), "channels": p.get("channels"), "voltage": p.get("voltage"),
                             "hz": p.get("hz"), "frame": p.get("frame"), "deltas": p.get("deltas") or [],
                             "devices": [{"id": d.get("id"), "name": d.get("name"), "w": d.get("w")} for d in p.get("devices") or []]})
+                if self.hunt is not None:
+                    try:
+                        self.hunt.feed(now, p.get("channels"), p.get("deltas") or [], p.get("devices") or [])
+                    except Exception as e:  # noqa: BLE001 — a hunt bug must not cost us the reading
+                        log.warning("hunt feed failed: %r", e)
                 for d in p.get("deltas") or []:
                     st.deltas[(web.LEGS[d["channel"]] if d.get("channel") in (0, 1) else "?",
                                "up" if d.get("w", 0) > 0 else "down")] += 1
@@ -217,9 +224,11 @@ class Collector:
             loop.add_signal_handler(sig, self.stopping.set)
         settings_db = self.store.path.parent / "settings.db"
         self.detector = Detector(self.store.path, settings_db)
+        circuits = Circuits(settings_db)
+        self.hunt = Hunt(circuits, self.detector, healthy=self.state.healthy, publish=self.state.publish)
         runner = await web.serve(self.state, self.store.path, Appearance(settings_db, self.store.path.parent), self.detector,
-                                 Circuits(settings_db), History(settings_db, lambda: self.sess),
-                                 Floorplans(settings_db, self.store.path.parent))
+                                 circuits, History(settings_db, lambda: self.sess),
+                                 Floorplans(settings_db, self.store.path.parent), self.hunt)
         tasks = [asyncio.create_task(self.connect_loop()), asyncio.create_task(self.watchdog()),
                  asyncio.create_task(self.detect_loop())]
         await self.stopping.wait()
