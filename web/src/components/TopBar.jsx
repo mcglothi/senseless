@@ -17,6 +17,7 @@ export const NAV = [
   { href: '/', label: 'Now' },
   { href: '/timeline', label: 'Timeline' },
   { href: '/loads', label: 'Loads' },
+  { href: '/map', label: 'Map' },
   { href: '/hunt', label: 'Hunt' },
   { href: '/history', label: 'History' },
 ]

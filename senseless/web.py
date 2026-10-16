@@ -455,7 +455,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
     app.add_routes([
         web.get("/", index), web.get("/status", legacy),
         # client-side routes: reloading them must serve the app, not 404
-        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt")],
+        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt", "/map")],
         web.get("/healthz", healthz), web.get("/metrics", metrics),
         web.get("/api/status", status), web.get("/api/deltas", deltas), web.get("/api/readings", readings),
         web.get("/api/today", today), web.get("/api/series", series), web.get("/api/baseline", baseline_get), web.get("/api/stream", stream),

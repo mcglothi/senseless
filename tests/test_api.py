@@ -166,7 +166,7 @@ def test_stream_delivers_snapshot_then_events(tmp_path):
                 assert (await c.get("/manifest.webmanifest")).status == 200
                 assert (await c.get("/apple-touch-icon.png")).status == 200
             # client-side routes don't 404 on reload
-            for path in ("/timeline", "/loads", "/history"):
+            for path in ("/timeline", "/loads", "/history", "/hunt", "/map"):
                 assert (await c.get(path)).status == 200
     asyncio.run(run())
 
