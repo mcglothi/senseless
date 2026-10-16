@@ -138,7 +138,8 @@ def bin_readings(readings: list[dict]) -> list[dict]:
     missing). Same rule as load_readings' SQL, for raw rows."""
     bins: dict[int, list[dict]] = {}
     for row in readings:
-        bins.setdefault(row["frame"] // POWER_BIN_FRAMES, []).append(row)
+        if row["frame"] >= 0:   # frame counters are never negative; skipped in the SQL path too
+            bins.setdefault(row["frame"] // POWER_BIN_FRAMES, []).append(row)
     out = []
     for b, rows in sorted(bins.items()):
         rows.sort(key=lambda row: row["frame"])
@@ -467,7 +468,7 @@ def load_readings(db_path: Path, since_ts: float) -> list[dict]:
             WITH r AS (
                 SELECT generation AS g, frame AS f, l1_w AS a, l2_w AS b, frame / :bin AS k,
                        frame - LAG(frame) OVER (PARTITION BY generation, frame / :bin ORDER BY frame) AS gap
-                FROM readings WHERE ts >= :since)
+                FROM readings WHERE ts >= :since AND frame >= 0)   -- SQLite / truncates, Python // floors
             SELECT g, k, MIN(f), MAX(f), COALESCE(MAX(gap), 0), MAX(a), MAX(b), MAX(a + b),
                    SUM(a IS NULL), SUM(b IS NULL)
             FROM r GROUP BY g, k ORDER BY g, k""", {"bin": POWER_BIN_FRAMES, "since": since_ts}).fetchall()
