@@ -5,7 +5,7 @@ Things we don't know yet, roughly in priority order. If you figure one out, move
 
 ## Protocol
 
-- [ ] Do 240 V loads (dryer, range, AC, water heater, EV) show **simultaneous** deltas on both channels?
+- [x] Do 240 V loads show **simultaneous** deltas on both channels? Yes: same `start_frame`, ~equal size (2026-10-15, findings.md).
 - [ ] Are `start_frame` and `frame` in a delta ever different? (Maybe for slow ramps.)
 - [ ] What is `c` in `realtime_update`? What is `bridge_server` used for?
 - [ ] When do `amps`, `ao_w`, `aux`, `_stats` appear? (Solar installs? Feature flags? Specific protocol version?)
