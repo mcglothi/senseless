@@ -360,7 +360,8 @@ class Billing:
 
     def price_today(self, kwh: float, hourly_w: list, day: date) -> tuple[float, dict]:
         """Energy cost of today's kWh: time-of-use splits it by hour (from the hourly averages), flat plans
-        use the one marginal rate."""
+        use the one marginal rate. Hourly average watts stand in for each hour's kWh, so the hour in progress
+        weighs as a full one: close enough for a live readout; the cycle bill uses Sense's hourly kWh."""
         r = self.rates()
         if not r.get("tou"):
             return kwh * r["marginal_cents_per_kwh"] / 100, r

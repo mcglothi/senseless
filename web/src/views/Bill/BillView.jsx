@@ -260,7 +260,10 @@ function Settings({ config, save }) {
 function CustomPlan({ s, save }) {
   const [f, setF] = useState({ fixed: s.custom.fixed, fixed_kwh: s.custom.fixed_kwh, delivery: s.custom.delivery * 100 })
   const commit = () => {
-    if ([f.fixed, f.fixed_kwh, f.delivery].some(v => String(v).trim() === '' || !Number.isFinite(Number(v)))) return
+    if ([f.fixed, f.fixed_kwh, f.delivery].some(v => String(v).trim() === '' || !Number.isFinite(Number(v)))) {
+      setF({ fixed: s.custom.fixed, fixed_kwh: s.custom.fixed_kwh, delivery: s.custom.delivery * 100 })   // back to what's saved
+      return
+    }
     save({ custom: { fixed: Number(f.fixed), fixed_kwh: Math.round(Number(f.fixed_kwh)), delivery: Number(f.delivery) / 100 } })
   }
   return (
