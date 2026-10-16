@@ -21,6 +21,7 @@ import websockets
 
 from . import auth, web
 from .appearance import Appearance
+from .detect import Detector
 from .state import LiveState
 from .store import Store
 
@@ -30,6 +31,7 @@ WS = "wss://clientrt.sense.com/monitors/{monitor_id}/realtimefeed?access_token={
 FEED_STALE_S = float(os.environ.get("SENSELESS_FEED_STALE_S", "60"))
 EXIT_AFTER_S = float(os.environ.get("SENSELESS_EXIT_AFTER_S", "900"))
 COMMIT_EVERY_S = 5.0
+DETECT_EVERY_S = 60.0
 RAW_RETENTION_DAYS = int(os.environ.get("SENSELESS_RAW_RETENTION_DAYS", "90"))
 READINGS_RETENTION_DAYS = int(os.environ.get("SENSELESS_READINGS_RETENTION_DAYS", "0"))  # 0 = keep forever
 
@@ -190,6 +192,16 @@ class Collector:
                 if n:
                     log.info("pruned %d readings older than %d days", n, READINGS_RETENTION_DAYS)
 
+    async def detect_loop(self) -> None:
+        """Recompute runs/patterns from stored steps every minute (worker thread; a failure never stops collection)."""
+        while not self.stopping.is_set():
+            try:
+                self.store.commit()  # include the latest steps
+                await asyncio.to_thread(self.detector.recompute)
+            except Exception as e:  # noqa: BLE001
+                log.warning("detection failed: %r", e)
+            await self._sleep(DETECT_EVERY_S)
+
     async def _sleep(self, s: float) -> None:
         try:
             await asyncio.wait_for(self.stopping.wait(), timeout=s)
@@ -200,8 +212,11 @@ class Collector:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self.stopping.set)
-        runner = await web.serve(self.state, self.store.path, Appearance(self.store.path.parent / "settings.db", self.store.path.parent))
-        tasks = [asyncio.create_task(self.connect_loop()), asyncio.create_task(self.watchdog())]
+        settings_db = self.store.path.parent / "settings.db"
+        self.detector = Detector(self.store.path, settings_db)
+        runner = await web.serve(self.state, self.store.path, Appearance(settings_db, self.store.path.parent), self.detector)
+        tasks = [asyncio.create_task(self.connect_loop()), asyncio.create_task(self.watchdog()),
+                 asyncio.create_task(self.detect_loop())]
         await self.stopping.wait()
         log.info("shutting down")
         self.state.close_streams()

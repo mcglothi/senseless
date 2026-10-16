@@ -119,7 +119,8 @@ def _web_dir() -> Path | None:
     return None
 
 
-def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None) -> web.Application:
+def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None,
+             detector=None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
@@ -235,6 +236,44 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         except AppearanceError as e:
             return _bad(e)
 
+    # ── loads (detected patterns) ───────────────────────────────────────────
+    def _det():
+        if detector is None:
+            raise web.HTTPNotFound(text="detection not running")
+        return detector
+
+    def _pattern_id(req) -> int:
+        try:
+            return int(req.match_info["id"])
+        except ValueError:
+            raise web.HTTPBadRequest(text="pattern id must be an integer")
+
+    async def loads(_):
+        d = _det()
+        start, _end = summary.day_bounds()
+        return web.json_response({"computed_at": d.computed_at, "patterns": d.loads(start)})
+
+    async def runs(req):
+        since = time.time() - _minutes(req, 180, 48 * 60) * 60
+        return web.json_response(_det().runs_since(since))
+
+    async def load_name(req):
+        body = await _body(req)
+        name = body.get("name")
+        if name is not None and not isinstance(name, str):
+            return _bad("name must be a string or null")
+        try:
+            return web.json_response(_det().patterns.name(_pattern_id(req), name))
+        except KeyError:
+            raise web.HTTPNotFound(text="no such pattern")
+
+    async def load_ignore(req):
+        body = await _body(req)
+        try:
+            return web.json_response(_det().patterns.ignore(_pattern_id(req), bool(body.get("ignored", True))))
+        except KeyError:
+            raise web.HTTPNotFound(text="no such pattern")
+
     web_dir = web_dir or _web_dir()
 
     async def index(_):
@@ -256,15 +295,17 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.get("/api/themes", themes), web.get("/api/themes/gallery", themes_gallery),
         web.post("/api/themes/install", themes_install), web.delete("/api/themes/{id}", themes_remove),
         web.get("/api/appearance", appearance_get), web.post("/api/appearance", appearance_post),
+        web.get("/api/loads", loads), web.get("/api/runs", runs),
+        web.post("/api/loads/{id}/name", load_name), web.post("/api/loads/{id}/ignore", load_ignore),
     ])
     if web_dir and (web_dir / "assets").is_dir():
         app.router.add_static("/assets", web_dir / "assets", append_version=False)
     return app
 
 
-async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None) -> web.AppRunner:
+async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None, detector=None) -> web.AppRunner:
     # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
-    runner = web.AppRunner(make_app(st, db_path, appearance), access_log=None, shutdown_timeout=3)
+    runner = web.AppRunner(make_app(st, db_path, appearance, detector=detector), access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))
     await web.TCPSite(runner, os.environ.get("SENSELESS_HTTP_HOST", "0.0.0.0"), port).start()

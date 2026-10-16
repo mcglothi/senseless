@@ -15,9 +15,13 @@ Things we don't know yet, roughly in priority order. If you figure one out, move
 
 ## Detection (software only, on top of the feed)
 
-- [ ] Pair on/off deltas into **events** (same channel, matching magnitude, within tolerance).
-- [ ] Cluster recurring events by (channel, magnitude, multi-step shape, duration) into candidate loads.
-- [ ] Labeling loop: "L2 +1726 W after +299 W, what is this?" → user names it once, it sticks.
+- [x] Pair on/off deltas into **runs** (same legs, matching size within 15%, multi-stage ons merged): `senseless/detect.py`.
+- [ ] Multi-step offs: some loads (a 240 V dryer here) switch on in one step and off in several partial steps;
+      those runs stay "unresolved" (counted, no duration/energy). Needs subset-sum style closing.
+- [ ] Same device split across two patterns when its step size varies (e.g. 47 W and 56 W, both ~13 s on L1).
+      Merge by name, or cluster on duration too.
+- [x] Group runs into patterns by legs, stage count and size (12%); patterns + names persist in settings.db.
+- [x] Labeling loop: Loads inbox with name ideas; named patterns tag future steps.
 - [ ] Decompose "Always On" and "Other" by leg.
 - [ ] Ground truth from other sources: Kasa/Shelly smart plugs, Emporia Vue circuit CTs (ESPHome-flashable).
 
