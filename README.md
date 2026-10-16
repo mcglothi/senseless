@@ -69,6 +69,12 @@ Browse days, months, and years from Sense's cloud history, cached locally. Drill
 
 Sense prices every kWh at one flat rate, which in Maine leaves out the delivery half of the bill. The Bill view prices your usage the way the utility bills it: a fixed monthly charge, delivery per kWh (flat or time-of-use), supply per kWh, and sales tax above the exempt amount. It projects the current billing cycle from Sense's daily history, shows the split, and says what each extra kWh costs. It also prices the same usage on every rate plan, so you can see whether time-of-use or another rate would be cheaper for how you actually use power. Enter real bills to check the estimate, and optionally scale projections to match them.
 
+The [billing API](notes/senseless-api.md) also imports CMP bill PDFs and Avangrid hourly meter CSVs.
+It discards personal information, checks imported bills with their original rates, compares current
+plans over the last 12 complete calendar months, compares Sense with the meter, and groups usage by
+temperature. With enough meter history, cycle comparisons use annual usage and projections adjust
+for last year's seasonal pattern. These import and insight features are available through the API.
+
 ![Bill view: projected bill split into fixed, delivery, supply and tax, daily use, and rate plans compared](docs/screenshots/bill.jpg)
 *This cycle priced by the tariff, next to what each rate plan would cost for the same usage.*
 
@@ -185,7 +191,7 @@ Your data directory contains:
 | Path | Contents |
 |---|---|
 | `senseless.db` | Realtime readings, on-board deltas, Sense's device power attribution on change, and other feed events. |
-| `settings.db` | Persistent patterns and names, breaker map, the property map (buildings, floors, rooms, markers), billing settings and entered bills, appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
+| `settings.db` | Persistent patterns and names, breaker map, the property map (buildings, floors, rooms, markers), billing settings, entered/imported bills and hourly meter data (without personal information), appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
 | `floorplans/` | Uploaded site and floor plan images. |
 | `raw/rt-YYYY-MM-DD.jsonl.gz` | Daily compressed archives of every feed message, enabled by default. |
 | `themes-gallery.json` | Cached theme gallery. |

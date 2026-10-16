@@ -12,7 +12,7 @@ from aiohttp import web
 
 from . import summary
 from .appearance import Appearance, AppearanceError
-from .billing import Billing, BillingError
+from .billing import Billing, BillingError, MAX_IMPORT_BYTES
 from .circuits import CircuitError, Circuits
 from .floorplans import FloorplanError, Floorplans, IMAGE_TYPES, MAX_IMAGE_BYTES
 from .history import History, HistoryError
@@ -38,6 +38,8 @@ API_INDEX = [
     {"method": "GET", "path": "/api/billing", "does": "tariff settings, available rate plans (with sources), current marginal rate"},
     {"method": "POST", "path": "/api/billing", "body": {"plan": "cmp-a|cmp-a-tou|cmp-et|custom", "supply_per_kwh": "num", "billing_day": "1-31", "tax_rate": "num", "tax_exempt_kwh": "num", "calibrate": "bool"}, "does": "change tariff settings"},
     {"method": "GET", "path": "/api/billing/cycle", "does": "this billing cycle: kWh so far, projected bill with fixed/delivery/supply/tax, other plans compared"},
+    {"method": "PUT", "path": "/api/billing/import", "does": "import hourly meter CSV or CMP PDF (raw body, X-Senseless-Upload: 1, maximum 20 MiB); discard personal data"},
+    {"method": "GET", "path": "/api/billing/insights", "does": "meter coverage, Sense accuracy, 12-month plan comparison, weather bins and historical bill checks"},
     {"method": "GET", "path": "/api/billing/estimate?kwh=&on_peak_kwh=&plan=&months=", "does": "what a bill for that usage would be"},
     {"method": "GET", "path": "/api/billing/bills", "does": "bills you entered, each with the model's estimate and the difference"},
     {"method": "POST", "path": "/api/billing/bills", "body": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD", "kwh": "num", "amount": "num"}, "does": "enter a real bill to check the estimates"},
@@ -635,6 +637,33 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         except HistoryError as e:
             return web.json_response({"error": f"Sense history unavailable: {e}"}, status=502)
 
+    async def billing_import(req):
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        try:
+            b = _bill()
+            if req.headers.get("X-Senseless-Upload") != "1":
+                raise BillingError("X-Senseless-Upload: 1 required")
+            if req.content_length is not None and req.content_length > MAX_IMPORT_BYTES:
+                raise BillingError("upload exceeds 20 MiB")
+            data = bytearray()
+            async for chunk in req.content.iter_chunked(64 * 1024):
+                if len(data) + len(chunk) > MAX_IMPORT_BYTES:
+                    raise BillingError("upload exceeds 20 MiB")
+                data.extend(chunk)
+            return web.json_response(await asyncio.to_thread(b.import_data, bytes(data)))
+        except BillingError as e:
+            return _bad(e)
+
+    async def billing_insights(_):
+        try:
+            return web.json_response(await asyncio.to_thread(_bill().insights))
+        except BillingError as e:
+            return _bad(e)
+        except HistoryError:
+            return web.json_response({"error": "Sense history unavailable"}, status=502)
+
     async def billing_estimate(req):
         from .billing import estimate
         try:
@@ -710,6 +739,7 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
         web.get("/api", api_index),
         web.get("/api/billing", billing_get), web.post("/api/billing", billing_post),
         web.get("/api/billing/cycle", billing_cycle), web.get("/api/billing/estimate", billing_estimate),
+        web.put("/api/billing/import", billing_import), web.get("/api/billing/insights", billing_insights),
         web.get("/api/billing/bills", bills_get), web.post("/api/billing/bills", bills_add),
         web.delete("/api/billing/bills/{id}", bills_remove),
         web.get("/api/hunt", hunt_get),

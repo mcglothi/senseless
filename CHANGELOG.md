@@ -2,6 +2,20 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## Unreleased
+
+### Added
+- Backend billing import API for CMP PDFs and Avangrid hourly meter CSVs. Only numeric/date fields are
+  retained; personal identifiers and original documents are discarded. Overlapping imports update
+  existing hours and bills.
+- Billing insights: Sense/meter accuracy, 12-month tariff comparisons, temperature bins, and checks
+  using each imported bill's own rates and split delivery segments.
+
+### Changed
+- Cycle plan comparisons use 12 complete calendar months of meter data when available. Projections
+  adjust for last year's seasonal usage when its matching window is complete. Calibration uses only
+  bills with matching current fixed and delivery rates.
+
 ## 0.9.0 (2026-10-16)
 
 ### Added
