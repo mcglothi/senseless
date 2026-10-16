@@ -220,7 +220,9 @@ class Billing:
         metadata = {k: result[k] for k in ('importer', 'label')}
         if result['kind'] == 'bill':
             return {'kind': 'bill-pdf', **self._save_bill(result['bill']), **metadata}
-        return {'kind': 'meter-csv', **self.usage.save(result['rows'], result['source']), **metadata}
+        saved = self.usage.save(result['rows'], result['source'])
+        self._meter_cache = None          # an import can change values without changing the fingerprint
+        return {'kind': 'meter-csv', **saved, **metadata}
 
     def _pricing_pack(self, settings):
         pack = pricing_pack(settings, self.tariffs.get(settings['pack']))
@@ -640,14 +642,24 @@ class Billing:
     LOCAL_COMPLETE = 0.97   # share of a day Senseless must have recorded to stand on its own
 
     def _local_days(self, start: date, end: date) -> dict:
+        """Senseless's per-day energy for [start, end). One page load needs the cycle and the week before it several
+        times, so the widest window read in the current minute is kept and sliced."""
         if self.local is None:
             return {}
-        tz = local_tz()
-        try:
-            return self.local(datetime.combine(start, datetime.min.time(), tz).timestamp(),
-                              datetime.combine(end, datetime.min.time(), tz).timestamp(), self.clock())
-        except Exception:      # noqa: BLE001 - a local read problem falls back to the other sources
-            return {}
+        minute = int(self.clock() // 60)
+        memo = getattr(self, "_local_memo", None)
+        if not (memo and memo[0] == minute and memo[1] <= start and end <= memo[2]):
+            lo, hi = start, end
+            if memo and memo[0] == minute:            # widen to cover both, so the next call is a slice
+                lo, hi = min(lo, memo[1]), max(hi, memo[2])
+            tz = local_tz()
+            try:
+                days = self.local(datetime.combine(lo, datetime.min.time(), tz).timestamp(),
+                                  datetime.combine(hi, datetime.min.time(), tz).timestamp(), self.clock())
+            except Exception:      # noqa: BLE001 - a local read problem falls back to the other sources
+                days = {}
+            memo = self._local_memo = (minute, lo, hi, days)
+        return {d: v for d, v in memo[3].items() if start <= d < end}
 
     def _daily_kwh(self, start: date, end: date, today: date) -> tuple[dict[date, float], float, dict]:
         """kWh per day for [start, end), from the best source that has the whole day: Senseless's own readings,
@@ -771,6 +783,7 @@ class Billing:
         now = datetime.fromtimestamp(self.clock(), tz)
         today = now.date()
         start, end = cycle_bounds(s["billing_day"], today)
+        self._local_days(min(start, today - timedelta(days=7)), today + timedelta(days=1))   # one read for this page
         daily, sense_cents, sources = self._daily_kwh(start, end, today)
         so_far = sum(daily.values())
         days = (end - start).days

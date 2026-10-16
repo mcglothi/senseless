@@ -112,7 +112,9 @@ def local_days(db_path: Path, start: float, end: float, now: float | None = None
     db = _connect(db_path)
     try:
         rows = db.execute("SELECT CAST(ts / 60 AS INTEGER) AS m, avg(w) AS w FROM readings "
-                          "WHERE ts >= ? AND ts < ? AND w IS NOT NULL GROUP BY m", (start, min(end, now))).fetchall()
+                          "WHERE ts >= ? AND ts < ? AND w IS NOT NULL GROUP BY m",
+                          # the minute in progress is left out until it's complete (it would count as a full one)
+                          (start, min(end, (now // 60) * 60))).fetchall()
     finally:
         db.close()
     out: dict = {}

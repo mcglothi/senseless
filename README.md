@@ -109,6 +109,14 @@ L2  −1907 W  off, single step, 1770 cycles (29.5 s) after start
 
 The detector can join the two startup stages and pair the shutdown. This is processed sensor data, not raw current waveforms. Load identity and energy remain estimates: overlapping loads, missed steps, and partial shutdowns can confuse the rules. See the [worked example and limitations](notes/detection.md).
 
+## Cloud independence
+
+Sense's consumer business may not last, and a monitor that only talks to Sense's servers would go dark with them. Senseless is built to keep as much as possible working on your own hardware:
+
+- **Already local:** every reading is stored in your own SQLite files; detection, cycles, naming, the property map, Device Hunt, bill pricing, imported bills and meter data all run on your machine. The Bill page prefers Senseless's own readings over Sense's history, and keeps working if Sense's cloud is unreachable.
+- **Still on Sense's cloud:** the live feed itself (the monitor streams to Sense, and Senseless subscribes with your account), history older than your Senseless install, and Sense's own device-name hints.
+- **Working toward fully local:** understanding the monitor's behaviour on your LAN, and accepting other live sources (circuit CTs, smart meters) so a home keeps its history and tools even if the Sense hardware is abandoned. Research contributions here are the most valuable kind.
+
 ## Quick start
 
 You need a Sense monitor and account. MFA-enabled accounts are not supported yet.
@@ -243,7 +251,7 @@ Next, roughly in order:
 - More utilities: Texas plans from their Electricity Facts Label (energy charge, base charge, TDU delivery, usage credits), tariff import from OpenEI's Utility Rate Database, and community tariff packs.
 - Verify the Smart Meter Texas and Green Button CSV importers against real exports (they follow the published formats; samples welcome).
 - Better identification: one appliance that shows up as several patterns, decomposing Always On and Other, and checking against smart plugs or circuit CTs.
-- Research: finer history, feed limits, unexplained protocol fields, and whether the monitor's LAN behaviour allows collection without Sense's cloud.
+- **Cloud independence (priority):** whether the monitor's LAN behaviour allows collection without Sense's cloud, and a live-source layer for other meters and CTs (see [Cloud independence](#cloud-independence)). Also finer history, feed limits and unexplained protocol fields.
 
 These are directions, not promises.
 
