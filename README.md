@@ -40,9 +40,9 @@ Two modes, one toggle:
 
 The hunt runs on the server, so a voice assistant can drive the same session through the API (`/api/hunt`, with a speakable `prompt` at every step) while the phone screen follows along. See [the API notes](notes/senseless-api.md#hunt-sessions-breaker-and-device).
 
-<img src="docs/screenshots/hunt-phone.jpg" alt="Hunt on a phone" width="360">
+<img src="docs/screenshots/hunt-phone.jpg" alt="Device Hunt on a phone" width="360">
 
-*Live leg readings and a guided baseline → breaker → save flow.*
+*Breakers or Devices: live leg readings and a guided measure → name flow.*
 
 ### Map
 
@@ -63,6 +63,9 @@ Browse days, months, and years from Sense's cloud history, cached locally. Drill
 ### Bill
 
 Sense prices every kWh at one flat rate, which in Maine leaves out the delivery half of the bill. The Bill view prices your usage the way the utility bills it: a fixed monthly charge, delivery per kWh (flat or time-of-use), supply per kWh, and sales tax above the exempt amount. It projects the current billing cycle from Sense's daily history, shows the split, and says what each extra kWh costs. It also prices the same usage on every rate plan, so you can see whether time-of-use or another rate would be cheaper for how you actually use power. Enter real bills to check the estimate, and optionally scale projections to match them.
+
+![Bill view: projected bill split into fixed, delivery, supply and tax, daily use, and rate plans compared](docs/screenshots/bill.jpg)
+*This cycle priced by the tariff, next to what each rate plan would cost for the same usage.*
 
 Central Maine Power's published residential tariffs (Rate A, time-of-use, Electric Technology) and the Maine Standard Offer supply price are built in, with their sources and effective dates; a custom plan covers other utilities. The Now view's cost-so-far and the always-on $/year use the same tariff.
 
