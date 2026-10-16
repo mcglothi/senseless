@@ -20,6 +20,7 @@ from pathlib import Path
 import websockets
 
 from . import auth, web
+from .appearance import Appearance
 from .state import LiveState
 from .store import Store
 
@@ -95,6 +96,9 @@ class Collector:
                 st.latest = p
                 st.last_message_at = now
                 self.last_rt_mono = time.monotonic()
+                st.publish({"type": "rt", "t": now, "w": p.get("w"), "channels": p.get("channels"), "voltage": p.get("voltage"),
+                            "hz": p.get("hz"), "frame": p.get("frame"), "deltas": p.get("deltas") or [],
+                            "devices": [{"id": d.get("id"), "name": d.get("name"), "w": d.get("w")} for d in p.get("devices") or []]})
                 for d in p.get("deltas") or []:
                     st.deltas[(web.LEGS[d["channel"]] if d.get("channel") in (0, 1) else "?",
                                "up" if d.get("w", 0) > 0 else "down")] += 1
@@ -104,6 +108,8 @@ class Collector:
                 if t == "error":
                     log.warning("feed error message: %s", str(p)[:300])
                 self.store.event(t or "?", p, now)
+                if t in ("new_timeline_event", "device_states", "hello"):
+                    st.publish({"type": t, "t": now, "payload": p})
             st.messages[t or "?"] += 1
         except Exception as e:  # noqa: BLE001 — one bad message must not stop collection
             st.messages["rejected"] += 1
@@ -194,10 +200,11 @@ class Collector:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self.stopping.set)
-        runner = await web.serve(self.state, self.store.path)
+        runner = await web.serve(self.state, self.store.path, Appearance(self.store.path.parent / "settings.db", self.store.path.parent))
         tasks = [asyncio.create_task(self.connect_loop()), asyncio.create_task(self.watchdog())]
         await self.stopping.wait()
         log.info("shutting down")
+        self.state.close_streams()
         if self.ws is not None:
             await self.ws.close()
         for t in tasks:

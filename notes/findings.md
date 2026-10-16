@@ -44,3 +44,16 @@ From 5 minutes of feed in one house:
 - "Watt Check": a measure-one-device-against-a-steady-baseline feature, present but hidden behind a
   debug flag (`debug_enable_wattcheck`), endpoint `devices/user_device_measurement/{id}`.
 - Firebase project `sense-consumer-app` is used for push / remote config, not the data path.
+
+## 2026-10-15 (evening): 240 V loads confirmed, Sense's clock runs ~10 s behind
+
+- **240 V appliances do step both legs in the same AC cycle.** Seen 3 times in one evening:
+  `+1,173 / +1,162 W`, `+1,217 / +1,232 W` (same `start_frame` on channel 0 and 1, ~equal size), and
+  matching two-leg drops (`−400 / −409 W`). Detected in the UI by pairing deltas with the same frame,
+  opposite legs, same sign, sizes within 25%. Answers the open question in [open-questions.md](open-questions.md).
+- **`epoch` in `realtime_update` lags local receive time by ~9.6 s** (measured against an NTP-synced Mac:
+  `ts − recv_ts = −9.6 s`). The same ~10 s offset showed up in the timeline event earlier, so it's Sense's
+  clock, not ours. The collector stores both (`ts`, `recv_ts`); use `frame` for relative timing.
+- Recurring patterns from one evening of deltas, all unlabeled for now: a ~495 W L2 load running ~3 min
+  (seen 20:51 and 22:08), a 45 W step on L2 every few seconds (300+ per day), and a ~55 W, ~13 s pulse on L1.
+  Steps under ~30 W are frequent enough to be mostly noise floor.

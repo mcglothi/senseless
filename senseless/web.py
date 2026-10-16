@@ -1,5 +1,7 @@
 """HTTP server: health, Prometheus metrics, JSON API, and a minimal status page."""
 
+import asyncio
+import json
 import os
 import sqlite3
 import time
@@ -7,7 +9,9 @@ from pathlib import Path
 
 from aiohttp import web
 
-from .state import LiveState
+from . import summary
+from .appearance import Appearance, AppearanceError
+from .state import CLOSE, LiveState
 
 LEGS = ("L1", "L2")
 
@@ -107,7 +111,15 @@ tick();setInterval(tick,3000);
 </script></body></html>"""
 
 
-def make_app(st: LiveState, db_path: Path) -> web.Application:
+def _web_dir() -> Path | None:
+    """The built frontend (web/dist). Docker copies it to /app/web; locally it's the repo's web/dist."""
+    for d in (os.environ.get("SENSELESS_WEB_DIR"), Path(__file__).resolve().parent.parent / "web" / "dist"):
+        if d and (Path(d) / "index.html").exists():
+            return Path(d)
+    return None
+
+
+def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None, web_dir: Path | None = None) -> web.Application:
     async def healthz(_):
         return web.json_response({"healthy": st.healthy(), "age": st.message_age()}, status=200 if st.healthy() else 503)
 
@@ -131,19 +143,128 @@ def make_app(st: LiveState, db_path: Path) -> web.Application:
         since = time.time() - _minutes(req, 10, 6 * 60) * 60
         return web.json_response(_query(db_path, "SELECT * FROM readings WHERE ts > ? ORDER BY frame", (since,)))
 
+    async def today(_):
+        cost = (st.latest or {}).get("defaultCost")
+        return web.json_response(await asyncio.to_thread(summary.today, db_path, cost))
+
+    async def series(req):
+        minutes = _minutes(req, 30, 24 * 60)
+        try:
+            bucket = min(max(float(req.query.get("bucket", 10)), 1), 3600)
+        except ValueError:
+            raise web.HTTPBadRequest(text="bucket must be a number")
+        return web.json_response(await asyncio.to_thread(summary.series, db_path, minutes, bucket))
+
+    async def stream(req):
+        """Server-sent events: a snapshot, then every realtime update / timeline event as it arrives."""
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache",
+                                           "X-Accel-Buffering": "no"})  # nginx/NPM: don't buffer
+        await resp.prepare(req)
+        q: asyncio.Queue = asyncio.Queue(maxsize=200)
+        st.subscribers.add(q)
+        try:
+            await resp.write(f"event: snapshot\ndata: {json.dumps(_snapshot())}\n\n".encode())
+            while True:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                    if ev is CLOSE:
+                        break
+                    await resp.write(f"data: {json.dumps(ev)}\n\n".encode())
+                except TimeoutError:
+                    await resp.write(b": keepalive\n\n")
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        finally:
+            st.subscribers.discard(q)
+        return resp
+
+    def _snapshot():
+        age = st.message_age()
+        return {"healthy": st.healthy(), "connected": st.connected, "monitor_online": st.monitor_online,
+                "last_message_age_seconds": round(age, 1) if age is not None else None, "latest": st.latest}
+
+    # ── appearance (same contract as Docket's) ──────────────────────────────
+    def _ap():
+        if appearance is None:
+            raise web.HTTPNotFound(text="appearance not configured")
+        return appearance
+
+    async def _body(req):
+        # Writes must be JSON from this origin: blocks cross-site "simple" POSTs (text/plain, no preflight)
+        if req.content_type != "application/json":
+            raise web.HTTPUnsupportedMediaType(text="expected application/json")
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        try:
+            return await req.json()
+        except (ValueError, UnicodeDecodeError):
+            raise web.HTTPBadRequest(text="expected a JSON body")
+
+    def _bad(e):
+        return web.json_response({"error": str(e)}, status=400)
+
+    async def themes(_):
+        return web.json_response({"themes": _ap().themes()})
+
+    async def themes_gallery(req):
+        return web.json_response(await asyncio.to_thread(_ap().gallery, req.query.get("refresh") == "1"))
+
+    async def themes_install(req):
+        body = await _body(req)
+        try:
+            return web.json_response({"themes": await asyncio.to_thread(_ap().install, str(body.get("id", "")))})
+        except AppearanceError as e:
+            return _bad(e)
+
+    async def themes_remove(req):
+        origin = req.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] != req.host:
+            raise web.HTTPForbidden(text="cross-origin write refused")
+        try:
+            return web.json_response({"themes": _ap().remove(req.match_info["id"])})
+        except AppearanceError as e:
+            return _bad(e)
+
+    async def appearance_get(_):
+        return web.json_response(_ap().settings())
+
+    async def appearance_post(req):
+        try:
+            return web.json_response(_ap().update(await _body(req)))
+        except AppearanceError as e:
+            return _bad(e)
+
+    web_dir = web_dir or _web_dir()
+
     async def index(_):
+        if web_dir:
+            return web.FileResponse(web_dir / "index.html", headers={"Cache-Control": "no-cache"})
+        return web.Response(text=STATUS_PAGE, content_type="text/html")
+
+    async def legacy(_):
         return web.Response(text=STATUS_PAGE, content_type="text/html")
 
     app = web.Application()
     app.add_routes([
-        web.get("/", index), web.get("/healthz", healthz), web.get("/metrics", metrics),
+        web.get("/", index), web.get("/status", legacy),
+        # client-side routes: reloading them must serve the app, not 404
+        *[web.get(p, index) for p in ("/timeline", "/loads", "/history", "/hunt")],
+        web.get("/healthz", healthz), web.get("/metrics", metrics),
         web.get("/api/status", status), web.get("/api/deltas", deltas), web.get("/api/readings", readings),
+        web.get("/api/today", today), web.get("/api/series", series), web.get("/api/stream", stream),
+        web.get("/api/themes", themes), web.get("/api/themes/gallery", themes_gallery),
+        web.post("/api/themes/install", themes_install), web.delete("/api/themes/{id}", themes_remove),
+        web.get("/api/appearance", appearance_get), web.post("/api/appearance", appearance_post),
     ])
+    if web_dir and (web_dir / "assets").is_dir():
+        app.router.add_static("/assets", web_dir / "assets", append_version=False)
     return app
 
 
-async def serve(st: LiveState, db_path: Path) -> web.AppRunner:
-    runner = web.AppRunner(make_app(st, db_path), access_log=None)
+async def serve(st: LiveState, db_path: Path, appearance: Appearance | None = None) -> web.AppRunner:
+    # shutdown_timeout: a backstop so a stuck client can never hold SIGTERM past Docker's 10 s grace
+    runner = web.AppRunner(make_app(st, db_path, appearance), access_log=None, shutdown_timeout=3)
     await runner.setup()
     port = int(os.environ.get("SENSELESS_HTTP_PORT", "8780"))
     await web.TCPSite(runner, os.environ.get("SENSELESS_HTTP_HOST", "0.0.0.0"), port).start()

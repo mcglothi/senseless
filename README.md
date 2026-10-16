@@ -34,8 +34,13 @@ Early. Today it has:
 - `senseless collect`: long-running collector, WebSocket → SQLite + daily raw `jsonl.gz` archive. Built to run
   unattended: stale-feed watchdog, re-auth on 401/403, malformed messages skipped, frame-counter reset handling,
   clean SIGTERM shutdown, raw archive retention.
-- Built-in HTTP server (port 8780): status page at `/`, Prometheus `/metrics`, `/healthz`, JSON `/api/status`,
-  `/api/deltas?minutes=N`, `/api/readings?minutes=N`
+- **Web UI** at `/` (React, in `web/`): live Now view (per-leg power, today's energy and cost, the last 30 minutes
+  with every step the monitor caught, 240 V and repeating-load spotting, always-on estimate). Fully themeable:
+  base16 themes with a built-in gallery of 570 [tinted-theming](https://github.com/tinted-theming/schemes) schemes,
+  light/dark/system, accent, background, density (theming engine shared with Docket). Default theme: **Senseless**.
+- HTTP API (port 8780): Prometheus `/metrics`, `/healthz`, live server-sent events `/api/stream`, JSON `/api/status`,
+  `/api/today`, `/api/series?minutes=N&bucket=S`, `/api/deltas?minutes=N`, `/api/readings?minutes=N`,
+  appearance `/api/themes*` and `/api/appearance`. The old plain status page is at `/status`.
 - `senseless deltas`: show recent step events in the terminal
 - `tools/sanitize.py`: strip account IDs from captures so you can share them
 - Docker image: `ghcr.io/mcglothi/senseless`
@@ -53,7 +58,7 @@ printf 'SENSE_EMAIL=you@example.com\nSENSE_PASSWORD=...\n' > .env && chmod 600 .
 docker compose up -d        # then open http://localhost:8780
 ```
 
-From source:
+From source (the UI needs a build once: `cd web && npm ci && npm run build`):
 
 ```bash
 uv sync

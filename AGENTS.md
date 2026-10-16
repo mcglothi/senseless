@@ -22,3 +22,12 @@ is the core protocol reference.
 - Feed connection: token in the query string only (headers break the handshake). See notes.
 - When you confirm something new, add a dated entry to `notes/findings.md` and tick it off in `open-questions.md`.
 - Run with `uv run senseless ...`. Python ≥ 3.12.
+
+## Web UI (`web/`)
+
+- React + Vite, no UI framework. Theming is Docket's engine (`src/ui/themes.js`, `theme.js`, `primitives.jsx`,
+  `hooks/useAppearance.js`, `components/Appearance/*`): every color is a CSS variable derived from a base16 palette.
+  Use `C.*` tokens (incl. `C.l1` / `C.l2` for legs), never hard-coded colors. The default theme is named **Senseless**.
+- Live data comes from `/api/stream` (SSE) via `hooks/useLive.js`; don't add polling for live numbers.
+- `npm test` (vitest) for pure helpers in `src/ui/format.js`; `npm run dev` proxies `/api` to `SENSELESS_API`.
+- Settings live in `settings.db`, NOT `senseless.db` (the collector holds a near-continuous write lock there).

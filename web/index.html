@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Senseless</title>
+    <link rel="icon" sizes="32x32" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%2317171c'/><rect x='6' y='16' width='5' height='10' rx='1.6' fill='%2300fff7'/><rect x='13.5' y='8' width='5' height='18' rx='1.6' fill='%23f97316'/><rect x='21' y='12' width='5' height='14' rx='1.6' fill='%23ffab00'/></svg>"><rect width='32' height='32' rx='7.5' fill='%2317191e'/><rect x='4.6' y='6.6' width='5.6' height='4.6' rx='1.8' fill='%2339ff5a'/><rect x='12.2' y='6.6' width='15.2' height='4.6' rx='1.8' fill='%23ffffff' opacity='.42'/><rect x='4.6' y='13.7' width='5.6' height='4.6' rx='1.8' fill='%23ffab00'/><rect x='12.2' y='13.7' width='11.4' height='4.6' rx='1.8' fill='%23ffffff' opacity='.42'/><rect x='4.6' y='20.8' width='5.6' height='4.6' rx='1.8' fill='%23bf5fff'/><rect x='12.2' y='20.8' width='7.6' height='4.6' rx='1.8' fill='%23ffffff' opacity='.42'/></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* Theme tokens. These are the default "Senseless" theme; the Appearance panel
+         overrides them on <html>. src/ui/theme.js maps C.* onto these. */
+      :root {
+        color-scheme: dark;
+        --bg: #080808; --field: #0b0b0e; --panel: #111115; --panel2: #17171c;
+        --bright: #ffffff; --text: #e8e8e8; --body: #c8c8c8; --muted: #8a8a8a; --dim: #555555; --faint: #333333;
+        --line: color-mix(in srgb, var(--text) 9%, transparent);
+        --line2: color-mix(in srgb, var(--text) 16%, transparent);
+        --green: #39ff5a; --amber: #ffab00; --orange: #f97316; --red: #ff4d4f;
+        --violet: #bf5fff; --blue: #2979ff; --cyan: #00fff7;
+        --accent: #ffab00;
+        /* Leg colors: L1 / L2 (derived per theme in src/ui/themes.js) */
+        --l1: #00fff7; --l2: #f97316;
+        --shade: rgba(0,0,0,0.6); --glow-k: 1;
+        /* Page background: pattern (body::before) and glow (body::after), set by the Appearance panel */
+        --dots: color-mix(in srgb, var(--text) 8%, transparent);
+        --texture-image: radial-gradient(circle, var(--dots) 1.2px, transparent 1.6px);
+        --texture-size: 28px 28px;
+        --texture-mask: none;
+        --glow-image: radial-gradient(circle 346px at 150px 150px, color-mix(in srgb, var(--accent) 3%, transparent), transparent),
+          radial-gradient(circle 297px at calc(100% - 120px) calc(100% - 120px), color-mix(in srgb, var(--accent) 2.7%, transparent), transparent);
+      }
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body, #root { height: 100%; }
+      body {
+        background: var(--bg);
+        font-family: 'Space Grotesk', sans-serif;
+        color: var(--text);
+        background-image: linear-gradient(180deg, color-mix(in srgb, var(--text) 1.2%, transparent) 0px, transparent 120px);
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image: var(--texture-image);
+        background-size: var(--texture-size);
+        -webkit-mask-image: var(--texture-mask); mask-image: var(--texture-mask);
+        -webkit-mask-size: var(--texture-size); mask-size: var(--texture-size);
+        pointer-events: none;
+        z-index: 0;
+      }
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image: var(--glow-image);
+        pointer-events: none;
+        z-index: 0;
+      }
+      #root { position: relative; z-index: 1; display: flex; flex-direction: column; zoom: var(--scale, 1); }
+      /* Native controls (checkboxes, date pickers, range, select) in the theme */
+      input, select, textarea, progress { accent-color: var(--accent); color-scheme: inherit; }
+      ::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+      /* Reduced motion (the Appearance setting, or macOS when it follows macOS) */
+      [data-motion="reduced"] *, [data-motion="reduced"] *::before, [data-motion="reduced"] *::after {
+        animation-duration: 0s !important; animation-iteration-count: 1 !important;
+        transition-duration: 0s !important; scroll-behavior: auto !important;
+      }
+      /* Theme switch: every color morphs together, for a quarter second */
+      [data-switching], [data-switching] *, [data-switching] *::before, [data-switching] *::after {
+        transition: color .25s, background-color .25s, border-color .25s, fill .25s, box-shadow .25s !important;
+      }
+      @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+      input::placeholder { color: var(--faint); }
+      ::-webkit-scrollbar { width: 4px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--faint); border-radius: 2px; }
+      html { scrollbar-color: var(--faint) transparent; }
+      a { color: inherit; text-decoration: none; }
+      button { font-family: inherit; }
+    </style>
+  </head>
+  <body>
+    <script>
+      // Paint the last-used theme before React loads and /api/appearance answers
+      // (src/ui/themes.js applyTokens writes this cache).
+      try {
+        const t = JSON.parse(localStorage.getItem('senseless.appearance.tokens'))
+        if (t) {
+          const s = document.documentElement.style
+          for (const [k, v] of Object.entries(t)) if (k !== 'scheme' && k !== 'motion') s.setProperty('--' + k, v)
+          s.colorScheme = t.scheme
+          document.documentElement.dataset.theme = t.scheme
+          if (t.motion) document.documentElement.dataset.motion = t.motion
+        }
+      } catch (e) { /* no cache yet */ }
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
