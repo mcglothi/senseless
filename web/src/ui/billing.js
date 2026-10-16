@@ -49,3 +49,22 @@ export function touAdvice(cycle) {
       : `${off}% of your use is off-peak; time-of-use pays off from about 86%, so it would cost ${usd(tou.delta)} more this cycle.`,
   }
 }
+
+// Plain words for a tariff's charge components (see notes/energy-providers-spec.md).
+export function describeComponents(components = []) {
+  const c = v => `${(v * 100).toFixed(v * 100 < 10 ? 3 : 2)}¢`
+  const hour = h => (h === 0 ? '12 am' : h < 12 ? `${h} am` : h === 12 ? '12 pm' : `${h - 12} pm`)
+  const parts = components.map(x => {
+    switch (x.type) {
+      case 'fixed': return `${usd(x.amount)}/${x.per ?? 'month'}${x.includes_kwh ? ` (includes ${x.includes_kwh} kWh)` : ''}`
+      case 'energy': return `${c(x.rate)}/kWh`
+      case 'rider': return `+${c(x.rate)}/kWh rider`
+      case 'tiered': return x.tiers.map((t, i) => `${c(t.rate)}/kWh${t.up_to_kwh != null ? ` up to ${t.up_to_kwh} kWh` : i ? ' above' : ''}`).join(', ')
+      case 'tou': return x.periods.map(p => `${c(p.rate)} ${p.name ?? 'peak'} (${hour(p.hours[0])}–${hour(p.hours[1])}${p.weekdays?.length === 5 ? ' weekdays' : ''})`).join(', ') + (x.default_rate != null ? `, ${c(x.default_rate)} other hours` : '')
+      case 'credit': return `${usd(Math.abs(x.amount))} credit at ${x.min_kwh}${x.max_kwh ? `–${x.max_kwh}` : '+'} kWh`
+      case 'minimum': return `minimum bill ${usd(x.amount)}`
+      default: return x.type
+    }
+  })
+  return parts.length ? parts.join(' + ') + '.' : ''
+}

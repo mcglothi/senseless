@@ -33,7 +33,7 @@ def preview(data: bytes, profiles=()):
     module, confidence = detect(data, profiles)
     if module is None:
         return {'importer': None, 'label': None, 'confidence': confidence, 'kind': None,
-                'sample': [], 'header': csv_generic.safe_header(data)}
+                'sample': [], 'header': csv_generic.safe_header(data), 'header_hash': csv_generic.header_hash(data)}
     result = import_data(data, profiles)
     sample = result['rows'][:5] if result['kind'] == 'usage' else [result['bill']]
     return {k: result[k] for k in ('importer', 'label', 'confidence', 'kind')} | {'sample': sample, 'header': []}

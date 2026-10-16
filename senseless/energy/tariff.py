@@ -259,7 +259,10 @@ def _calculate(pack, plan, supply, kwh, profile, on_peak_kwh, months, days):
                     used = max(0, kwh - line['allowance'])
                     base += tier_cost(c['tiers'], used, months) - tier_cost(c['tiers'], max(0, used - taxable_kwh), months)
                 else:
-                    base += line['amount'] * taxable_kwh / kwh if kwh else 0
+                    if tax['exempt_kwh'] == 0:
+                        base += line['amount']
+                    elif kwh:
+                        base += line['amount'] * taxable_kwh / kwh
         taxes.append({'label': tax['label'], 'kind': 'tax', 'type': 'tax', 'amount': base * tax['rate']})
     lines += taxes
     fixed = sum(l['amount'] for l in lines if l['kind'] == 'fixed')

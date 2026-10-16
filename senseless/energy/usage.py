@@ -1,7 +1,57 @@
 """Interval persistence and overlap-aware hourly analysis in settings.db."""
 import math
+from bisect import bisect_right
+from datetime import datetime, time, timedelta
+from functools import lru_cache
 
 from . import BillingError
+
+
+@lru_cache(maxsize=1024)
+def _hour_edges(day, tz):
+    # Enumerating wall hours (both folds) handles fractional offsets and DST.
+    return sorted({int(datetime.combine(day + timedelta(days=d), time(h), tz).replace(fold=f).timestamp())
+                   for d in (-1, 0, 1) for h in range(24) for f in (0, 1)})
+
+
+def interval_buckets(rows, tz=None):
+    buckets = {}
+    for row in rows:
+        cursor, stop = row['ts'], row['ts'] + row['seconds']
+        while cursor < stop:
+            if tz is None:
+                start = cursor // 3600 * 3600
+                end = start + 3600
+            else:
+                edges = _hour_edges(datetime.fromtimestamp(cursor, tz).date(), tz)
+                i = bisect_right(edges, cursor)
+                start, end = edges[i - 1:i + 1]
+            buckets.setdefault((start, end), []).append(row)
+            cursor = end
+    return sorted(buckets.items())
+
+
+def _resolve_bucket(start, end, candidates, additive=False):
+    edges = sorted({start, end} | {max(start, r['ts']) for r in candidates}
+                   | {min(end, r['ts'] + r['seconds']) for r in candidates})
+    for begin, stop in zip(edges, edges[1:]):
+        active = [r for r in candidates if r['ts'] <= begin and r['ts'] + r['seconds'] >= stop]
+        if not active:
+            continue
+        if not additive:
+            active = [min(active, key=lambda r: (r['seconds'], -r['ts']))]
+        seconds = stop - begin
+        temps = [r['temp_f'] for r in active if r['temp_f'] is not None]
+        exports = [r['received'] * seconds / r['seconds'] for r in active if r['received'] is not None]
+        yield {'ts': begin, 'seconds': seconds, 'kwh': sum(r['kwh'] * seconds / r['seconds'] for r in active),
+               'temp_f': sum(temps) / len(temps) if temps else None,
+               'received': sum(exports) if exports else None}
+
+
+def resolved_segments(rows, *, additive=False):
+    """Resolve one stream's overlaps, or sum already resolved independent streams."""
+    return [segment for (start, end), candidates in interval_buckets(rows)
+            for segment in _resolve_bucket(start, end, candidates, additive)]
 
 
 class UsageStore:
@@ -19,8 +69,10 @@ class UsageStore:
     def save(self, rows, source):
         normalized = {}
         try:
+            # Importers validate source durations; overlap resolution can create
+            # shorter fragments at another meter's boundaries.
             for ts, seconds, kwh, temp, received in rows:
-                if type(ts) is not int or type(seconds) is not int or not 300 <= seconds <= 86400:
+                if type(ts) is not int or type(seconds) is not int or not 1 <= seconds <= 86400:
                     raise ValueError
                 if kwh is None or any(v is not None and (type(v) not in (int, float) or not math.isfinite(v)) for v in (kwh, temp, received)):
                     raise ValueError
@@ -46,40 +98,19 @@ class UsageStore:
         with self.connect() as db:
             return [dict(r) for r in db.execute('SELECT * FROM usage_interval ORDER BY ts, seconds')]
 
-    def hourly(self):
-        """Choose the finest observation for every covered segment, then sum by UTC hour.
+    def hourly(self, tz=None):
+        """Resolve overlaps and aggregate at local tariff hours (UTC by default).
 
-        Coarser intervals fill only uncovered time. Energy is uniform within an interval;
-        this also supports intervals crossing hours and partial finer-interval coverage.
+        Coarser intervals fill uncovered time; energy is uniform within an interval.
+        Local boundaries keep fractional-offset TOU periods and days intact.
         """
-        rows = self.intervals()
-        buckets = {}
-        for row in rows:
-            stop = row['ts'] + row['seconds']
-            hour = row['ts'] // 3600 * 3600
-            while hour < stop:
-                buckets.setdefault(hour, []).append(row)
-                hour += 3600
         result = []
-        for hour, candidates in sorted(buckets.items()):
-            edges = sorted({hour, hour + 3600} | {max(hour, r['ts']) for r in candidates}
-                           | {min(hour + 3600, r['ts'] + r['seconds']) for r in candidates})
-            kwh = received = temp_sum = temp_seconds = covered = 0
-            has_received = False
-            for start, end in zip(edges, edges[1:]):
-                active = [r for r in candidates if r['ts'] <= start and r['ts'] + r['seconds'] >= end]
-                if not active:
-                    continue
-                row = min(active, key=lambda r: (r['seconds'], -r['ts']))
-                seconds = end - start
-                covered += seconds
-                kwh += row['kwh'] * seconds / row['seconds']
-                if row['received'] is not None:
-                    received += row['received'] * seconds / row['seconds']
-                    has_received = True
-                if row['temp_f'] is not None:
-                    temp_sum += row['temp_f'] * seconds
-                    temp_seconds += seconds
-            result.append({'ts': hour, 'kwh': kwh, 'temp_f': temp_sum / temp_seconds if temp_seconds else None,
-                           'received': received if has_received else None, 'coverage_seconds': covered})
+        for (hour, end), candidates in interval_buckets(self.intervals(), tz):
+            segments = list(_resolve_bucket(hour, end, candidates))
+            temps = [r for r in segments if r['temp_f'] is not None]
+            exports = [r['received'] for r in segments if r['received'] is not None]
+            result.append({'ts': hour, 'kwh': sum(r['kwh'] for r in segments),
+                           'temp_f': sum(r['temp_f'] * r['seconds'] for r in temps) / sum(r['seconds'] for r in temps) if temps else None,
+                           'received': sum(exports) if exports else None,
+                           'coverage_seconds': sum(r['seconds'] for r in segments)})
         return result

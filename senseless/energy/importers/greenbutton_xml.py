@@ -3,11 +3,33 @@ import math
 import xml.etree.ElementTree as ET
 
 from .. import BillingError
+from ..usage import resolved_segments
 
 NAME = 'greenbutton-xml'
 LABEL = 'Green Button XML'
 ESPI = '{http://naesb.org/espi}'
 ATOM = '{http://www.w3.org/2005/Atom}'
+MAX_XML_TEXT = 20 * 1024 * 1024
+
+
+class _NoDTDTreeBuilder(ET.TreeBuilder):
+    """Reject DTDs before Expat expands any entity, regardless of XML encoding.
+
+    Entity expansion budget is zero. Bound ordinary text as well, including when
+    this importer is called directly rather than through the upload size guard.
+    """
+    def __init__(self):
+        super().__init__()
+        self.text_size = 0
+
+    def doctype(self, name, pubid, system):
+        raise ValueError('DTD forbidden')
+
+    def data(self, text):
+        self.text_size += len(text)
+        if self.text_size > MAX_XML_TEXT:
+            raise ValueError('XML text limit')
+        super().data(text)
 
 
 def detect(data: bytes) -> float:
@@ -16,9 +38,7 @@ def detect(data: bytes) -> float:
 
 def parse(data: bytes) -> dict:
     try:
-        if b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():
-            raise ValueError
-        root = ET.fromstring(data)
+        root = ET.fromstring(data, parser=ET.XMLParser(target=_NoDTDTreeBuilder()))
         entries = root.findall('.//' + ATOM + 'entry')
         if root.tag == ATOM + 'entry':
             entries = [root]
@@ -56,7 +76,30 @@ def parse(data: bytes) -> dict:
                     return result
             return None
 
-        rows = {}
+        def usage_point(entry, seen=None):
+            # Resource paths and Atom links identify a stream only during parsing.
+            # No UsagePoint/MeterReading identity is returned or persisted.
+            if entry is None:
+                return ''
+            seen = set() if seen is None else seen
+            if id(entry) in seen:
+                return ''
+            seen.add(id(entry))
+            if entry.find('.//' + ESPI + 'UsagePoint') is not None:
+                return entry.findtext(ATOM + 'id') or str(id(entry))
+            targets = [entry.findtext(ATOM + 'id', '')] + [l.get('href', '') for l in entry.findall(ATOM + 'link')]
+            for target in targets:
+                path = target.rstrip('/')
+                if 'UsagePoint/' in path:
+                    return 'UsagePoint/' + path.split('UsagePoint/', 1)[1].split('/')[0]
+            for link in entry.findall(ATOM + 'link'):
+                if link.get('rel') in ('up', 'related'):
+                    result = usage_point(resources.get(link.get('href', '').rstrip('/')), seen)
+                    if result:
+                        return result
+            return ''
+
+        streams = {}
         blocks = [(entry, block) for entry in entries for block in entry.findall('.//' + ESPI + 'IntervalBlock')]
         if not entries:
             blocks = [(None, block) for block in root.findall('.//' + ESPI + 'IntervalBlock')]
@@ -70,6 +113,7 @@ def parse(data: bytes) -> dict:
             if not -12 <= multiplier <= 12:
                 raise ValueError
             received = rt.findtext(ESPI + 'flowDirection') == '19'
+            rows = streams.setdefault((usage_point(entry), received), {})
             for reading in block.findall(ESPI + 'IntervalReading'):
                 ts = int(reading.findtext(ESPI + 'timePeriod/' + ESPI + 'start'))
                 seconds = int(reading.findtext(ESPI + 'timePeriod/' + ESPI + 'duration'))
@@ -81,8 +125,16 @@ def parse(data: bytes) -> dict:
                     row[4] = (row[4] or 0) + kwh
                 else:
                     row[2] += kwh
-        if not rows:
+        if not streams:
             raise ValueError
-        return {'kind': 'usage', 'rows': [tuple(r) for r in rows.values()], 'source': NAME}
+        resolved = []
+        for rows in streams.values():
+            resolved.extend(resolved_segments([
+                dict(zip(('ts', 'seconds', 'kwh', 'temp_f', 'received'), r)) for r in rows.values()]))
+        combined = resolved_segments(resolved, additive=True)
+        if not combined:
+            raise ValueError
+        return {'kind': 'usage', 'rows': [(r['ts'], r['seconds'], r['kwh'], r['temp_f'], r['received'])
+                                         for r in combined], 'source': NAME}
     except (ET.ParseError, ValueError, TypeError, OverflowError):
         raise BillingError('invalid Green Button XML (Wh ReadingType and interval timestamps required)') from None

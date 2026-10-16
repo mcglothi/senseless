@@ -39,10 +39,12 @@ pricing to senseless/energy. Keep public behaviour and existing API responses; t
 
 Table usage_interval(ts INTEGER NOT NULL, seconds INTEGER NOT NULL, kwh REAL NOT NULL, temp_f REAL,
 received REAL, source TEXT NOT NULL, PRIMARY KEY (ts, seconds)) — ts = interval start (unix seconds),
-seconds = 900 or 3600 (accept 300..86400). Migrate existing meter_hourly rows (seconds=3600,
+Source intervals accept 300..86400 seconds; resolved multi-meter fragments may be shorter (at least one second). Migrate existing meter_hourly rows (seconds=3600,
 source='avangrid-csv') idempotently. Upsert on (ts, seconds). Hourly aggregation for analysis sums the
 intervals inside each hour; never double count when both 15-min and 60-min rows cover the same hour
-(prefer the finer interval).
+(prefer the finer interval). Analysis buckets follow the selected tariff's local hours, including fractional UTC offsets.
+Green Button overlaps resolve separately per UsagePoint and flow before streams are combined; identities
+are discarded before persistence.
 
 ## Importers
 
@@ -66,9 +68,10 @@ mapping).
     export.
   - greenbutton_csv: TYPE,DATE,START TIME,END TIME,USAGE,UNITS,COST,NOTES style (PG&E-like; dates local,
     use SENSELESS_TZ). Also unverified on a real export: say so.
-  - saved mappings: the user maps an unknown CSV once: {name, match_headers: [...], columns: {start,
-    end?, date?, time?, kwh, temp_f?}, time_format?, timezone?, units: "kWh"|"Wh"}. Stored in settings.db
-    (csv_profiles table); a CSV whose header matches a saved profile imports with it.
+  - saved mappings: {name, match_hash, columns: {start, end?, date?, time?, kwh, temp_f?},
+    time_format?, timezone?, units: "kWh"|"Wh"}. The hash fingerprints normalized headers in column order.
+    Legacy match_headers inputs are converted on save; stored legacy profiles migrate on startup.
+    settings.db retains the hash and mapped column names, never the complete uploaded header row.
   Never store identifying columns (names, addresses, account/ESIID/meter ids): only the mapped values.
 - bill_cmp: the current CMP parser (PDF via pypdf + text). detect = "%PDF-" and the CMP text markers.
 

@@ -7,6 +7,11 @@ import { toast } from '../../ui/primitives'
 
 const MAX = 20 * 1024 * 1024
 
+async function preview(file) {
+  const res = await fetch('/api/billing/import/preview', { method: 'POST', body: file, headers: { 'X-Senseless-Upload': '1', 'Content-Type': file.type || 'application/octet-stream' } })
+  return res.ok ? res.json() : null
+}
+
 async function upload(file) {
   if (file.size > MAX) throw new Error('over 20 MB')
   const res = await fetch('/api/billing/import', { method: 'PUT', body: file, headers: { 'X-Senseless-Upload': '1', 'Content-Type': file.type || 'application/octet-stream' } })
@@ -23,11 +28,12 @@ export function summarize(results) {
   return { bills, usageFiles: usage.length, rows, failed }
 }
 
-export function BillImport({ onImported, onUnknownCsv }) {
+export function BillImport({ onImported }) {
   const { accent } = useTheme()
   const [over, setOver] = useState(false)
   const [busy, setBusy] = useState(null)        // {done, total}
   const [results, setResults] = useState([])
+  const [mapping, setMapping] = useState(null)   // {file, header, header_hash} for a CSV nobody recognises
   const input = useRef(null)
 
   const run = async files => {
@@ -43,8 +49,12 @@ export function BillImport({ onImported, onUnknownCsv }) {
     setResults(out)
     const s = summarize(out)
     toast([s.bills && `${s.bills} bill${s.bills > 1 ? 's' : ''}`, s.usageFiles && `${s.rows.toLocaleString()} usage readings`, s.failed && `${s.failed} not recognised`].filter(Boolean).join(' · ') || 'Nothing imported')
-    const unknown = out.find(r => !r.ok && r.data?.header)
-    if (unknown && onUnknownCsv) onUnknownCsv(unknown)
+    // a CSV no importer recognised: offer to map its columns once
+    const unknownIdx = out.findIndex(r => !r.ok && /unrecognized/i.test(r.error))
+    if (unknownIdx >= 0 && /\.(csv|txt)$/i.test(list[unknownIdx].name)) {
+      const p = await preview(list[unknownIdx])
+      if (p?.header_hash) setMapping({ file: list[unknownIdx], header: p.header, header_hash: p.header_hash })
+    }
     onImported?.()
   }
 
@@ -67,6 +77,7 @@ export function BillImport({ onImported, onUnknownCsv }) {
         <input ref={input} type="file" multiple hidden accept=".pdf,.csv,.xml,application/pdf,text/csv,text/xml,application/xml"
           onChange={e => { const f = e.target.files; run(f); e.target.value = '' }} />
       </div>
+      {mapping && <CsvMapper m={mapping} onCancel={() => setMapping(null)} onSaved={async () => { const f = mapping.file; setMapping(null); await run([f]) }} />}
       {s && (
         <div style={{ marginTop: 10, fontFamily: MONO, fontSize: 11, color: C.body, lineHeight: 1.7 }}>
           {s.bills > 0 && <div>✓ {s.bills} bill{s.bills > 1 ? 's' : ''} imported</div>}
@@ -76,6 +87,69 @@ export function BillImport({ onImported, onUnknownCsv }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+const ROLES = [['', 'Ignore'], ['start', 'Start time'], ['date', 'Date'], ['time', 'Time of day'], ['kwh', 'Energy'], ['temp_f', 'Temperature °F']]
+
+export function mappingFrom(header, roles, units, name, hash, timezone) {
+  const columns = {}
+  header.forEach((h, i) => { if (roles[i] && h !== '[redacted]') columns[roles[i]] = h })
+  const ok = columns.kwh && (columns.start || (columns.date && columns.time))
+  return ok ? { name, match_hash: hash, columns, units, timezone } : null
+}
+
+function CsvMapper({ m, onCancel, onSaved }) {
+  const { accent } = useTheme()
+  const guess = h => (/kwh|energy|usage|consumption|value/i.test(h) ? 'kwh' : /temp|weather/i.test(h) ? 'temp_f' : /start|begin|from|timestamp|when/i.test(h) ? 'start' : /^date$|day/i.test(h) ? 'date' : /^time$/i.test(h) ? 'time' : '')
+  const [roles, setRoles] = useState(() => {
+    const r = m.header.map(h => (h === '[redacted]' ? '' : guess(h)))
+    return r.map((x, i) => (x && r.indexOf(x) !== i ? '' : x))   // each role once
+  })
+  const [units, setUnits] = useState('kWh')
+  const [name, setName] = useState(() => (m.file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 40) || 'my-meter'))
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+  const profile = mappingFrom(m.header, roles, units, name, m.header_hash, tz)
+  const save = async () => {
+    try {
+      const res = await fetch('/api/billing/csv-profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profile) })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(data?.error || res.statusText)
+      toast('Mapping saved; importing…')
+      onSaved()
+    } catch (e) { toast(e.message) }
+  }
+  const sel = { height: 34, background: C.field, border: `1px solid ${C.line2}`, borderRadius: 7, color: C.text, fontFamily: MONO, fontSize: 12, padding: '0 6px' }
+  return (
+    <div role="dialog" aria-label="Map CSV columns" style={{ marginTop: 12, padding: 14, borderRadius: 12, border: `1px solid ${alpha(accent, '60')}`, background: alpha(accent, '08'), display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, color: C.bright }}>Teach Senseless this CSV ({m.file.name})</div>
+      <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+        Say which column holds what; files with the same columns will import automatically from now on. Columns that look like names,
+        addresses or account numbers are hidden and never stored. Times without an offset are read as {tz}.
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8 }}>
+        {m.header.map((h, i) => (
+          <label key={i} style={{ display: 'flex', flexDirection: 'column', gap: 3, fontFamily: MONO, fontSize: 11, color: h === '[redacted]' ? C.dim : C.body }}>
+            {h === '[redacted]' ? `Column ${i + 1} (hidden)` : h}
+            <select value={roles[i]} disabled={h === '[redacted]'} style={sel}
+              onChange={e => setRoles(r => r.map((x, k) => (k === i ? e.target.value : x === e.target.value && e.target.value ? '' : x)))}>
+              {ROLES.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+            </select>
+          </label>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontFamily: MONO, fontSize: 11, color: C.body }}>Energy is in
+          <select value={units} onChange={e => setUnits(e.target.value)} style={sel}><option>kWh</option><option>Wh</option></select>
+        </label>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 3, fontFamily: MONO, fontSize: 11, color: C.body }}>Mapping name
+          <input value={name} onChange={e => setName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 64))} style={{ ...sel, width: 180 }} />
+        </label>
+        <button type="button" disabled={!profile} onClick={save} style={{ ...sel, cursor: profile ? 'pointer' : 'default', color: C.bg, background: profile ? accent : C.line2, border: 'none', padding: '0 14px', fontWeight: 700 }}>Save and import</button>
+        <button type="button" onClick={onCancel} style={{ ...sel, cursor: 'pointer', padding: '0 12px' }}>Cancel</button>
+      </div>
+      {!profile && <div style={{ fontFamily: MONO, fontSize: 11, color: C.amber }}>Pick an Energy column and either a Start time, or a Date and a Time of day.</div>}
     </div>
   )
 }

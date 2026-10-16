@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from .summary import local_tz
@@ -164,6 +165,11 @@ class Billing:
                 db.execute("UPDATE bills SET lines_json=?, source='bill-cmp' WHERE id=?",
                            (json.dumps(lines), bill['id']))
             db.execute('CREATE TABLE IF NOT EXISTS csv_profiles (name TEXT PRIMARY KEY, body TEXT NOT NULL)')
+            for row in db.execute('SELECT name, body FROM csv_profiles').fetchall():
+                value = json.loads(row['body'])
+                if 'match_headers' in value:
+                    db.execute('UPDATE csv_profiles SET body=? WHERE name=?',
+                               (json.dumps(validate_profile(value)), row['name']))
             db.execute('CREATE TABLE IF NOT EXISTS user_tariffs (id TEXT PRIMARY KEY, body TEXT NOT NULL)')
         self.usage = UsageStore(self._conn)
         self.tariffs = tariff.Tariffs(self._conn)
@@ -475,7 +481,8 @@ class Billing:
 
     # ── meter-backed analysis ───────────────────────────────────────────
     def _meter_rows(self) -> list[dict]:
-        return self.usage.hourly()
+        settings = self.settings()
+        return self.usage.hourly(ZoneInfo(self.tariffs.get(settings['pack'])['timezone']))
 
     @staticmethod
     def _meter_days(rows: list[dict]) -> dict:
@@ -511,23 +518,22 @@ class Billing:
         monthly = {}
         for r in window:
             dt = datetime.fromtimestamp(r["ts"], tz)
-            item = monthly.setdefault(dt.strftime("%Y-%m"), {"kwh": 0.0, "on": 0.0, "rows": []})
+            item = monthly.setdefault(dt.strftime("%Y-%m"), {"kwh": 0.0, "rows": []})
             item["kwh"] += r["kwh"]
             item['rows'].append({'ts': r['ts'], 'kwh': max(0, r['kwh'])})
-            if tou_plan and is_on_peak(dt, tou_plan):
-                item["on"] += r["kwh"]
         months = []
         d = start
         while d < end:
             key = d.strftime("%Y-%m")
-            item = monthly.get(key, {"kwh": 0.0, "on": 0.0, "rows": []})
+            item = monthly.get(key, {"kwh": 0.0, "rows": []})
             kwh = max(0.0, item["kwh"])
             # Negative net-export readings are not consumption; preserve aggregate net kWh,
             # scaling positive hours to it so the engine gets a consistent profile.
             profile = self._scaled_profile(item['rows'], kwh)
             month_days = ((d + timedelta(days=32)).replace(day=1) - d).days
-            totals = {pid: self.estimate(kwh, item['on'], pid, hourly=profile, days=month_days)['total'] for pid in plan_ids}
-            months.append({"month": key, "kwh": round(kwh, 3), "on_peak_share": round(item["on"] / kwh, 5) if kwh else 0.0,
+            on = sum(r['kwh'] for r in profile if tou_plan and is_on_peak(datetime.fromtimestamp(r['ts'], tz), tou_plan))
+            totals = {pid: self.estimate(kwh, plan_id=pid, hourly=profile, days=month_days)['total'] for pid in plan_ids}
+            months.append({"month": key, "kwh": round(kwh, 3), "on_peak_share": round(on / kwh, 5) if kwh else 0.0,
                            "totals": totals})
             d = (d + timedelta(days=32)).replace(day=1)
         return {"from": start.isoformat(), "to": end.isoformat(), "months": months,
@@ -665,10 +671,10 @@ class Billing:
         for offset in range(1, 8):
             day = today - timedelta(days=offset)
             body = self.history.get('day', day.isoformat())
-            start = datetime.combine(day, datetime.min.time(), tz).timestamp()
             for hour, kwh in enumerate(body.get('kwh') or []):
                 if kwh is not None:
-                    rows.append({'ts': int(start + hour * 3600), 'kwh': max(0, kwh)})
+                    rows.append({'ts': int(datetime.combine(day, datetime.min.time(), tz).replace(hour=min(hour, 23)).timestamp()),
+                                 'kwh': max(0, kwh)})
         return rows
 
     def cycle(self) -> dict:
@@ -778,7 +784,7 @@ class Billing:
             if not rows or sum(r['kwh'] for r in rows) <= 0:
                 rows = [{'ts': start - 7 * 86400 + h * 3600, 'kwh': 1.0} for h in range(168)]
             baseline = self._scaled_profile(rows, last['kwh'])
-            increment = [{'ts': start + h * 3600, 'kwh': w / total} for h, w in weights] if total else [{'ts': start, 'kwh': 1.0}]
+            increment = [{'ts': int(datetime.combine(day, datetime.min.time(), tz).replace(hour=h).timestamp()), 'kwh': w / total} for h, w in weights] if total else [{'ts': start, 'kwh': 1.0}]
             marginal = tariff.estimate(self._pricing_pack(settings), settings['plan'], settings['supply'], last['kwh'],
                                        hourly=baseline, marginal_hourly=increment)['marginal_cents_per_kwh']
             return kwh * marginal / 100, r

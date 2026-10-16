@@ -81,7 +81,7 @@
       "label": "CMP Electric Technology rate",
       "kind": "delivery",
       "effective": "2026-07-01",
-      "source": "cmpco.com Electric Technology Rate page (unverified against the tariff sheet; expires Jan 2027)",
+      "source": "CMP Electric Delivery Rate Schedule page 48.00 (ninth revision, effective 2025-10-31); terminates with the January 2027 billing cycle unless renewed",
       "components": [
         {
           "type": "fixed",

@@ -5,6 +5,7 @@ verified against real exports. Ambiguous local DST times are rejected; use an of
 or a saved profile with an unambiguous timestamp for those rows.
 """
 import csv
+import hashlib
 import io
 import math
 import re
@@ -37,10 +38,30 @@ def headers(data):
         return []
 
 
+# Labels made only of these words are shown on the mapping screen; anything else (which could be a household
+# value, e.g. a file whose first row is data) is redacted, in previews and in error messages alike.
+VOCAB = set("""when until from to start end begin finish date day time hour minute timestamp local utc gmt period
+interval duration read reading readings usage energy consumption consumed kwh wh kw kvarh value net delivered received
+export import generation surplus temperature temp f c degrees weather cost costs price amount units unit uom notes
+note quality estimated actual estimate type flow channel demand peak in out of the and""".split())
+
+
 def safe_header(data):
-    # Unknown column labels can themselves contain household data: only return known labels.
-    return [h.strip() if not IDENTITY.search(h) and SAFE_HEADER.fullmatch(h.strip()) else '[redacted]'
-            for h in headers(data)][:100]
+    out = []
+    for h in headers(data)[:100]:
+        h = h.strip()
+        words = re.findall(r'[a-z]+', h.lower())
+        shown = SAFE_HEADER.fullmatch(h) or (words and len(h) <= 60 and all(w in VOCAB for w in words)
+                                               and not IDENTITY.search(h) and not re.search(r'\d{4,}', h))
+        out.append(h if shown else '[redacted]')
+    return out
+
+
+def header_hash(data):
+    """Fingerprint of a CSV's full header row: a saved mapping can match a file by it without anyone (the UI, the
+    database) ever holding the identifying column labels."""
+    names = normalized(headers(data))
+    return hashlib.sha256('\x1f'.join(names).encode()).hexdigest() if names else None
 
 
 def normalized(names):
@@ -52,8 +73,12 @@ def profile_for(data, profiles=()):
     for name, names in [('avangrid-csv', AVANGRID), ('smart-meter-texas', SMT), ('greenbutton-csv', GREENBUTTON)]:
         if set(found) == set(normalized(names)) and len(found) == len(names):
             return name, None
+    digest = hashlib.sha256('\x1f'.join(found).encode()).hexdigest() if found else None
     for profile in profiles:
-        if set(found) == set(normalized(profile['match_headers'])) and len(found) == len(profile['match_headers']):
+        if profile.get('match_hash'):
+            if profile['match_hash'] == digest:
+                return 'saved-csv', profile
+        elif set(found) == set(normalized(profile['match_headers'])) and len(found) == len(profile['match_headers']):
             return 'saved-csv', profile
     return None, None
 
@@ -65,21 +90,29 @@ def detect(data: bytes) -> float:
 def validate_profile(value):
     """Validate schema only; never quote a user-provided column or value in an error."""
     try:
-        if not isinstance(value, dict) or set(value) - {'name', 'match_headers', 'columns', 'time_format', 'timezone', 'units'}:
+        if not isinstance(value, dict) or set(value) - {'name', 'match_headers', 'match_hash', 'columns', 'time_format', 'timezone', 'units'}:
             raise ValueError
         if not isinstance(value['name'], str) or not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', value['name']):
             raise ValueError
-        names = value['match_headers']
-        if not isinstance(names, list) or not names or len(names) > 100 or any(not isinstance(h, str) or not 0 < len(h) <= 100 for h in names):
+        if ('match_hash' in value) == ('match_headers' in value):        # exactly one way to recognise the file
             raise ValueError
-        if len(set(normalized(names))) != len(names):
-            raise ValueError
+        if 'match_hash' in value:
+            if not isinstance(value['match_hash'], str) or not re.fullmatch(r'[0-9a-f]{64}', value['match_hash']):
+                raise ValueError
+            names = None
+        else:
+            names = value['match_headers']
+            if not isinstance(names, list) or not names or len(names) > 100 or any(not isinstance(h, str) or not 0 < len(h) <= 100 for h in names):
+                raise ValueError
+            if len(set(normalized(names))) != len(names):
+                raise ValueError
         columns = value['columns']
         if not isinstance(columns, dict) or set(columns) - {'start', 'end', 'date', 'time', 'kwh', 'temp_f'}:
             raise ValueError
         if 'kwh' not in columns or not ('start' in columns or {'date', 'time'} <= columns.keys()):
             raise ValueError
-        if any(not isinstance(h, str) or h.casefold().strip() not in normalized(names) or IDENTITY.search(h) for h in columns.values()):
+        if any(not isinstance(h, str) or not 0 < len(h) <= 100 or IDENTITY.search(h) or (names is not None and h.casefold().strip() not in normalized(names))
+               for h in columns.values()):
             raise ValueError
         if value.get('units', 'kWh') not in ('kWh', 'Wh'):
             raise ValueError
@@ -89,7 +122,11 @@ def validate_profile(value):
             raise ValueError
     except (KeyError, TypeError, ValueError):
         raise BillingError('invalid CSV mapping (name must be a short slug; map only usage/time/temperature columns)') from None
-    return {**value, 'units': value.get('units', 'kWh')}
+    profile = {**value, 'units': value.get('units', 'kWh')}
+    if names is not None:
+        profile.pop('match_headers')
+        profile['match_hash'] = hashlib.sha256('\x1f'.join(normalized(names)).encode()).hexdigest()
+    return profile
 
 
 def timestamp(value, tz, fmt=None):
@@ -170,6 +207,7 @@ def parse(data: bytes, profiles=()) -> dict:
                     direction = row['consumption_surplusgeneration'].casefold().replace(' ', '')
                     if direction not in ('consumption', 'surplusgeneration'):
                         raise ValueError
+                    revision = timestamp(row['revision_date'] + ' 00:00', tz)
                     if direction == 'surplusgeneration':
                         received, kwh = kwh, 0.0
             else:
@@ -188,15 +226,15 @@ def parse(data: bytes, profiles=()) -> dict:
             if not 300 <= seconds <= 86400:
                 raise ValueError
             key = (ts, seconds)
-            if key in rows and name == 'smart-meter-texas':
-                # Keep the final revision of each flow instead of adding duplicate consumption.
-                smt_channels[key, direction] = (kwh, received)
-                used = smt_channels.get((key, 'consumption'), (0, None))[0]
-                exported = smt_channels.get((key, 'surplusgeneration'), (0, None))[1]
+            if name == 'smart-meter-texas':
+                # Resolve each flow by revision date, independent of file order.
+                previous = smt_channels.get((key, direction))
+                if previous is None or revision >= previous[0]:
+                    smt_channels[key, direction] = (revision, kwh, received)
+                used = smt_channels.get((key, 'consumption'), (None, 0, None))[1]
+                exported = smt_channels.get((key, 'surplusgeneration'), (None, 0, None))[2]
                 rows[key] = (ts, seconds, used, temp, exported)
             else:
-                if name == 'smart-meter-texas':
-                    smt_channels[key, direction] = (kwh, received)
                 rows[key] = (ts, seconds, kwh, temp, received)
         if not rows:
             raise ValueError

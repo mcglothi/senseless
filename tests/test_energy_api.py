@@ -64,7 +64,9 @@ def test_energy_routes_crud_preview_privacy_and_guards(tmp_path):
         assert (await request('POST', profile_path, body=mapping, headers={'Origin': 'http://evil.invalid'})).status == 403
         assert (await request('POST', profile_path, raw=b'{}')).status == 415
         assert (await request('POST', profile_path, body=mapping)).status == 200
-        assert json.loads((await request('GET', profile_path)).text) == [mapping]
+        stored_mapping = {k: v for k, v in mapping.items() if k != 'match_headers'}
+        stored_mapping['match_hash'] = unknown['header_hash']
+        assert json.loads((await request('GET', profile_path)).text) == [stored_mapping]
         preview = json.loads((await request('POST', path, raw=raw, headers=good)).text)
         assert preview['kind'] == 'usage' and len(preview['sample']) == 5
         assert b.usage.intervals() == []

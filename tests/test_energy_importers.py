@@ -234,3 +234,23 @@ def test_legacy_cmp_bill_lines_migrate_without_losing_amount(tmp_path):
     assert sum(line['amount'] for line in reopened['lines']) == pytest.approx(bill['amount'])
     assert {line['kind'] for line in reopened['lines']} == {'fixed', 'delivery', 'supply', 'tax'}
     assert Billing(b.db_path).bills()[0] == reopened
+
+
+def test_mapping_by_header_hash_never_needs_identifying_labels(tmp_path):
+    """The UI sees only safe labels; a mapping saved with the header's hash imports later files of that shape."""
+    b = Billing(tmp_path / 's.db')
+    header = ['Customer Name', 'Account Number', 'When', 'Energy', 'Temperature']
+    data = csv_data(header, [[PII[0], PII[3], '2026-01-01T00:00:00+00:00', '1.25', '30'],
+                             [PII[0], PII[3], '2026-01-01T01:00:00+00:00', '2.5', '31']])
+    preview = b.preview_import(data)
+    assert preview['header'] == ['[redacted]', '[redacted]', 'When', 'Energy', 'Temperature']
+    assert len(preview['header_hash']) == 64
+    b.save_csv_profile({'name': 'my-meter', 'match_hash': preview['header_hash'],
+                        'columns': {'start': 'When', 'kwh': 'Energy', 'temp_f': 'Temperature'}})
+    result = b.import_data(data)
+    assert result['label'] == 'Saved CSV mapping' and result['added'] == 2
+    stored = json.dumps(b.csv_profiles())
+    assert 'Customer' not in stored and 'Account' not in stored
+    private(b, preview, stored)
+    with pytest.raises(BillingError):          # both or neither recognition key
+        b.save_csv_profile({'name': 'x', 'columns': {'start': 'When', 'kwh': 'Energy'}})
