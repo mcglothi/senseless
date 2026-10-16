@@ -16,6 +16,7 @@ Things we don't know yet, roughly in priority order. If you figure one out, move
 ## Detection (software only, on top of the feed)
 
 - [x] Pair on/off deltas into **runs** (same legs, matching size within 15%, multi-stage ons merged): `senseless/detect.py`.
+- [x] Reject hours-long stale-on pairings when sustained leg power disproves the run or its overlap with a newer cycle (2026-10-16, findings.md); ambiguous pairs remain possible.
 - [ ] Multi-step offs: some loads (a 240 V dryer here) switch on in one step and off in several partial steps;
       those runs stay "unresolved" (counted, no duration/energy). Needs subset-sum style closing.
 - [ ] Same device split across two patterns when its step size varies (e.g. 47 W and 56 W, both ~13 s on L1).

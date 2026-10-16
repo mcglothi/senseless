@@ -29,6 +29,15 @@ the most recent compatible on-step on exactly the same legs. The size test is
 `abs(on_w - abs(off_w)) <= max(0.15 * on_w, 20 W)`
 (`PAIR_TOL = 0.15`, `PAIR_ABS_W = 20`). An unmatched off is discarded.
 
+When readings are available, sustained power below the on-size minus that tolerance
+retires the on as `unresolved` before matching an off. A completed newer compatible
+cycle also retires older candidates if power during their supposed overlap cannot
+support both loads. Evidence uses maxima in fully covered five-second bins, skips
+startup/stages and off transitions, and stays within a frame-counter generation.
+Missing data and isolated dips do not reject runs. For `both`, use total leg power.
+No off time is invented; retired runs contribute zero duration/energy and cannot
+be revived by pattern timing. Supported long runs retain the six-hour pairing limit.
+
 `MAX_RUN_S = 6 * 3600` (6 hours) limits pairing. Before considering an off, the
 detector removes older ons from the pairing candidates. Unclosed runs older than
 6 hours at recompute time are dropped from the result, not retained as unresolved.

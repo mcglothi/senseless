@@ -68,3 +68,16 @@ From 5 minutes of feed in one house:
 - Period starts come back at 05:00Z (the EST offset) even during EDT, so Sense's "day" can be shifted by an
   hour from a local day.
 - For this house, October so far: 605 kWh, of which "Always On" 49% and "Other" 40%; Sense names ~11%.
+
+## 2026-10-16: Missed offs can become hours-long mis-pairs
+
+- **Verified by replaying local deltas and checking per-leg readings:** the newest-compatible-on
+  rule still leaves older unmatched ons eligible after newer cycles close. Later unrelated drops
+  can close those stale ons hours later. Some such intervals have sustained leg power below the
+  putative load's on-size, disproving continuous operation.
+- Pairing now retires candidates contradicted by sustained power, including impossible overlap
+  with a newer completed similar cycle (see [detection.md](detection.md)). Synthetic regressions
+  preserve supported long loads and overlapping identical loads; reverting the fix reproduces
+  a false five-hour closed run. No local captures were added to the repository.
+- **Limit:** this is a feasibility check, not appliance identity. High background power, missing
+  readings and starts before the evidence window can leave ambiguous long pairs intact.

@@ -6,8 +6,8 @@ Pipeline, recomputed over a sliding window (cheap: a few thousand deltas a day):
    size are one 240 V step (legs "both").
 2. **Stages**: same-sign steps on the same legs within STAGE_FRAMES are one multi-stage step
    (a microwave: +299 W, then +1,726 W 90 cycles later).
-3. **Runs**: an "on" step is closed by the most recent compatible "off" on the same legs (size
-   within PAIR_TOL). Unclosed ons younger than MAX_RUN_S are runs still in progress.
+3. **Runs**: an "off" step closes the most recent compatible "on" on the same legs (size
+   within PAIR_TOL), unless sustained leg power disproves it. Missed offs become unresolved.
 4. **Patterns**: runs are grouped by legs + stage count + size; a run joins the nearest known
    pattern centre within CLUSTER_TOL, else starts a new one. Patterns and their names persist in
    settings.db, so names survive recomputes and restarts.
@@ -18,6 +18,7 @@ import math
 import sqlite3
 import threading
 import time
+from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -128,13 +129,77 @@ def _compatible(on: Run, off: Step) -> bool:
 
 
 BUCKET_W = 5.0
+POWER_BIN_FRAMES = 5 * FPS
 
 
-def pair_runs(steps: list[Step], now_ts: float) -> list[Run]:
+class PowerEvidence:
+    """Range minima of sustained leg power, keyed by frame within one generation.
+
+    A bin contributes its *maximum* power: all its samples must contradict an on
+    before we reject it. Require coverage across the five-second bin, with no
+    gaps over two seconds. Missing data and isolated dips are not evidence.
+    """
+
+    def __init__(self, readings: list[dict]):
+        bins: dict[int, list[dict]] = {}
+        for row in readings:
+            bins.setdefault(row["frame"] // POWER_BIN_FRAMES, []).append(row)
+        self.frames = []
+        powers = {leg: [] for leg in ("L1", "L2", "both")}
+        for b, rows in sorted(bins.items()):
+            rows.sort(key=lambda row: row["frame"])
+            start = b * POWER_BIN_FRAMES
+            if (rows[0]["frame"] > start + FPS or
+                    rows[-1]["frame"] < start + POWER_BIN_FRAMES - FPS or
+                    any(y["frame"] - x["frame"] > 2 * FPS for x, y in zip(rows, rows[1:]))):
+                continue
+            self.frames.append(start)
+            for leg, keys in (("L1", ("l1_w",)), ("L2", ("l2_w",)), ("both", ("l1_w", "l2_w"))):
+                values = [sum(row[k] for k in keys) if all(
+                    row.get(k) is not None and math.isfinite(row[k]) for k in keys
+                ) else math.inf for row in rows]
+                powers[leg].append(max(values))
+        # Segment trees keep each candidate check logarithmic rather than
+        # rescanning hours of per-second readings for every unmatched on.
+        self.n = len(self.frames)
+        self.trees = {}
+        for leg, values in powers.items():
+            tree = [math.inf] * self.n + values
+            for i in range(self.n - 1, 0, -1):
+                tree[i] = min(tree[2 * i], tree[2 * i + 1])
+            self.trees[leg] = tree
+
+    def contradicts(self, run: Run, end_frame: int, extra_floor: float = 0) -> bool:
+        # Leave startup/stages and the candidate off's own transition out.
+        start = run.start_frame + run.stages[-1][0] + STAGE_FRAMES
+        stop = end_frame - STAGE_FRAMES - POWER_BIN_FRAMES
+        lo = bisect_left(self.frames, start) + self.n
+        hi = bisect_right(self.frames, stop) + self.n
+        floor = run.w - max(PAIR_TOL * run.w, PAIR_ABS_W) + extra_floor
+        tree = self.trees[run.legs]
+        while lo < hi:
+            if lo % 2:
+                if tree[lo] < floor:
+                    return True
+                lo += 1
+            if hi % 2:
+                hi -= 1
+                if tree[hi] < floor:
+                    return True
+            lo //= 2
+            hi //= 2
+        return False
+
+
+def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = None) -> list[Run]:
     """Close each off with the most recent compatible open on (same legs, size within tolerance).
     Open runs are indexed by legs and 5 W size bucket, so an off only looks at sizes it could match:
-    thousands of unmatched ons (missed offs, noise) stay linear instead of quadratic."""
+    thousands of unmatched ons (missed offs, noise) stay linear instead of quadratic.
+    When readings are available, a sustained power floor below an on's size
+    retires it as unresolved before it can steal a later off. No end is invented.
+    """
     runs: list[Run] = []
+    power = PowerEvidence(readings) if readings else None
     open_by: dict[str, dict[int, list[tuple[int, Run]]]] = {}
     for s in steps:
         if s.w > 0:
@@ -155,15 +220,37 @@ def pair_runs(steps: list[Step], now_ts: float) -> list[Run]:
             lst[:] = [(i, r) for i, r in lst if s.ts - r.start_ts <= MAX_RUN_S]
             for i, r in reversed(lst):
                 if _compatible(r, s):
+                    if power is not None and power.contradicts(r, s.frame):
+                        r.status = "unresolved"
+                        continue
                     if best is None or i > best[0]:
                         best = (i, r, b)
                     break  # lists are in start order: the first compatible from the end is this bucket's newest
+            lst[:] = [(i, r) for i, r in lst if r.running]
         if best:
             i, r, b = best
             r.end_frame, r.end_ts, r.off_w, r.status = s.frame, s.ts, round(s.w, 1), "closed"
             buckets[b].remove((i, r))
-    # unclosed for longer than anything plausibly runs: the off was missed; drop it
-    return [r for r in runs if not (r.running and now_ts - r.start_ts > MAX_RUN_S)]
+            if power is not None:
+                # A completed newer cycle can disprove an older similar on:
+                # during their supposed overlap the leg must support BOTH loads.
+                # Retire the stale candidate, never manufacture an off for it.
+                for b in range(int(max(lo, 0) // BUCKET_W), int(hi // BUCKET_W) + 1):
+                    lst = buckets.get(b, [])
+                    for _, older in lst:
+                        if older.start_frame < r.start_frame and _compatible(older, s):
+                            floor = older.w - max(PAIR_TOL * older.w, PAIR_ABS_W)
+                            if power.contradicts(r, s.frame, extra_floor=floor):
+                                older.status = "unresolved"
+                    lst[:] = [(j, older) for j, older in lst if older.running]
+    # Preserve the existing six-hour expiry, including power-retired ons.
+    runs = [r for r in runs if r.end_frame is not None or now_ts - r.start_ts <= MAX_RUN_S]
+    if power is not None and readings:
+        end = max(row["frame"] for row in readings) + STAGE_FRAMES
+        for r in runs:
+            if r.running and power.contradicts(r, end):
+                r.status = "unresolved"
+    return runs
 
 
 def resolve_open_runs(runs: list[Run], now_ts: float, min_s: float = 600, factor: float = 3) -> None:
@@ -175,7 +262,7 @@ def resolve_open_runs(runs: list[Run], now_ts: float, min_s: float = 600, factor
         if r.status == "closed":
             closed.setdefault(r.pattern, []).append(r.duration_s(now_ts))
     for r in runs:
-        if r.status == "closed":
+        if r.status in ("closed", "unresolved"):
             continue
         ds = sorted(closed.get(r.pattern, []))
         # with closed examples: 3x their median (a 13 s pulse isn't "on" after a minute); without: min_s
@@ -305,18 +392,34 @@ def load_deltas(db_path: Path, since_ts: float) -> list[dict]:
         db.close()
 
 
-def detect_runs(deltas: list[dict], now_ts: float) -> list[Run]:
+def detect_runs(deltas: list[dict], now_ts: float, readings: list[dict] | None = None) -> list[Run]:
     """Steps and runs per frame-counter generation (frames only compare within one), combined.
     A run spanning a monitor reboot can't close and expires like any missed off."""
     by_gen: dict[int, list[dict]] = {}
     for d in deltas:
         by_gen.setdefault(d.get("generation", 0), []).append(d)
+    readings_by_gen: dict[int, list[dict]] = {}
+    for row in readings or []:
+        readings_by_gen.setdefault(row.get("generation", 0), []).append(row)
     runs: list[Run] = []
     for gen in sorted(by_gen):
-        for r in pair_runs(to_steps(by_gen[gen]), now_ts):
+        for r in pair_runs(to_steps(by_gen[gen]), now_ts, readings_by_gen.get(gen)):
             r.generation = gen
             runs.append(r)
     return runs
+
+
+def load_readings(db_path: Path, since_ts: float) -> list[dict]:
+    """Power evidence for the same window as deltas; older delta-only DBs still work."""
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='readings'").fetchone():
+            return []
+        db.row_factory = sqlite3.Row
+        return [dict(row) for row in db.execute(
+            "SELECT generation, frame, l1_w, l2_w FROM readings WHERE ts >= ?", (since_ts,))]
+    finally:
+        db.close()
 
 
 def load_sense_ons(db_path: Path, since_ts: float) -> list[dict]:
@@ -398,7 +501,8 @@ class Detector:
 
     def recompute(self, now_ts: float | None = None) -> None:
         now_ts = now_ts if now_ts is not None else time.time()
-        runs = detect_runs(load_deltas(self.deltas_db, now_ts - WINDOW_S), now_ts)
+        since = now_ts - WINDOW_S
+        runs = detect_runs(load_deltas(self.deltas_db, since), now_ts, load_readings(self.deltas_db, since))
         self.patterns.assign(runs)
         resolve_open_runs(runs, now_ts)
         try:
