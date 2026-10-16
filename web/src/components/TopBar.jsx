@@ -60,14 +60,20 @@ export function TopBar({ status, frame, isMobile, onOpenAppearance, onToggleMode
         <Mark />
         <span style={{ fontWeight: 700, fontSize: 17, letterSpacing: 0.4, color: C.bright }}>Senseless</span>
       </a>
-      <nav aria-label="Primary" style={{ display: 'flex', gap: 4, flexWrap: 'wrap', order: isMobile ? 3 : 0, width: isMobile ? '100%' : 'auto' }}>
+      {/* One row on phones: tighter tabs, and a sideways scroll on screens too narrow even for that. */}
+      <nav aria-label="Primary" style={{
+        display: 'flex', gap: isMobile ? 2 : 4, flexWrap: isMobile ? 'nowrap' : 'wrap', order: isMobile ? 3 : 0, width: isMobile ? '100%' : 'auto',
+        overflowX: isMobile ? 'auto' : 'visible', scrollbarWidth: 'none',
+        // A scroll container clips focus rings; this padding leaves room for them without moving the tabs.
+        ...(isMobile && { padding: '3px 0', margin: '-3px 0' }),
+      }}>
         {NAV.map(n => {
           const on = n.href === '/' ? path === '/' : path.startsWith(n.href)
           return (
             <a key={n.href} href={n.href} onClick={link(n.href)} aria-current={on ? 'page' : undefined}
               title={n.soon ? 'Coming soon' : undefined}
               style={{
-                fontFamily: MONO, fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', padding: '8px 12px', borderRadius: 8,
+                fontFamily: MONO, fontSize: 11, letterSpacing: isMobile ? 1 : 1.5, textTransform: 'uppercase', padding: isMobile ? '8px 9px' : '8px 12px', borderRadius: 8, flexShrink: 0,
                 color: on ? C.accent : n.soon ? C.dim : C.muted, background: on ? alpha(C.accent, '14') : 'transparent',
                 border: `1px solid ${on ? alpha(C.accent, '45') : 'transparent'}`,
               }}>{n.label}</a>

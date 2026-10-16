@@ -2,6 +2,15 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.6.1 (2026-10-16)
+
+### Fixed
+- Phone nav: with the Map tab added, History wrapped onto a second row at phone widths. Tabs now sit on
+  one row (tighter spacing) and scroll sideways on screens too narrow for that.
+
+### Docs
+- README screenshots refreshed: the Map tab now appears in the nav, and the stray `">` is gone.
+
 ## 0.6.0 (2026-10-16)
 
 ### Added
