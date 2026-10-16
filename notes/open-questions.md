@@ -21,6 +21,10 @@ Things we don't know yet, roughly in priority order. If you figure one out, move
 - [x] Size surge starts by covered pre/settled leg power; cluster and pair by running size, retaining run/pattern `inrush_w` (2026-10-16, findings.md).
 - [x] Bounded compound offs: when no single run matches, try up to 12 recent open runs on the same legs; expose `closed_by="shared-off"` (2026-10-16, findings.md).
 - [x] Recover the pool-pump replay: baseline-relative evidence rejects the stale 13:05 single, and 20% surge tolerance closes the 901 W pump singly at 14:28:10 (2026-10-16, round 3 in findings.md).
+- [x] Preserve named/ignored pattern identities when historical runs resize from surge to settled watts; retain run associations before assigning resized runs (2026-10-16, review follow-up in findings.md).
+- [x] Bound small-load slack, check summed overlap, and account for independently confirmed background offs in the sustained floor (2026-10-16, synthetic regressions and replay).
+- [x] Treat both-leg switching as overlapping either conductor during startup sizing (2026-10-16, synthetic regressions and replay).
+- [ ] Recover the probable well pump without trusting its contaminated settled window: the broader overlap guard sees an L1 −124.9 W event and conservatively leaves it unresolved (2026-10-16, review follow-up in findings.md).
 - [ ] Validate against more labeled data: salt's settled window lacks coverage, and small shared closures remain questionable during program chatter despite the ten-minute start-gap limit; see round 3 in findings.md.
 - [ ] Multi-step offs: some loads (a 240 V dryer here) switch on in one step and off in several partial steps;
       those runs stay "unresolved" (counted, no duration/energy). Needs subset-sum style closing.

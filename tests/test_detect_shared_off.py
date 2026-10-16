@@ -35,7 +35,7 @@ def test_shared_off_requires_nearby_start_frames(gap, closes):
     assert all(r.closed_by == "shared-off" and r.end_ts == 1000 for r in runs) is closes
 
 
-@pytest.mark.parametrize("low,closes", [(2100, False), (2900, True)])
+@pytest.mark.parametrize("low,closes", [(2100, False), (2900, False), (3100, True)])
 def test_shared_off_checks_baseline_relative_individual_and_overlap_power(low, closes):
     # The absolute 1003 W summed floor alone cannot disprove the stale pair.
     rs = power(210, lambda t: 2000 if t < 30 else 2900 if t < 85 else

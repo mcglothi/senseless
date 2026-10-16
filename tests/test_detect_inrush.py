@@ -63,7 +63,8 @@ def test_non_surge_or_subthreshold_on_is_untouched(level, on):
 
 
 @pytest.mark.parametrize("t,w,channel,adjust", [
-    (50, 120, 0, False), (50, -120, 0, False),
+    (50, 400, 0, False), (50, -400, 0, False),         # sizeable next to the 2,200 W surge: ambiguous
+    (50, 120, 0, True), (50, -120, 0, True),           # a small switch beside a big surge doesn't block
     (50.5, 500, 0, True), (40, 119, 0, True), (40, 500, 1, True),
 ])
 def test_switching_inside_settle_window_skips_adjustment(t, w, channel, adjust):
@@ -74,11 +75,11 @@ def test_switching_inside_settle_window_skips_adjustment(t, w, channel, adjust):
     assert run.w == (1000 if adjust else 2200)
 
 
-def test_overlap_guard_uses_exact_leg_categories():
+def test_overlap_guard_includes_single_leg_events_inside_both_window():
     ds, rs = motor(legs="both")
-    ds.append(delta(40, -120, 1))
-    assert detect_runs(ds, 140, rs)[0].inrush_w == 2200
-    ds += [delta(45, 200, ch) for ch in (0, 1)]
+    ds.append(delta(40, -400, 1))
+    assert detect_runs(ds, 140, rs)[0].inrush_w is None
+    ds += [delta(45, 400, ch) for ch in (0, 1)]
     assert detect_runs(ds, 140, rs)[0].inrush_w is None
 
 
@@ -93,7 +94,7 @@ def test_last_stage_anchors_settled_window_and_first_stage_anchors_baseline():
     assert run.w == 1000 and run.inrush_w == 2200
     assert len(run.stages) == 11 and run.stages[-1][0] == 20 * 60
     # A separate event after t+20 but inside last-stage+20 still blocks adjustment.
-    ds.append(delta(60, -120))
+    ds.append(delta(60, -400))
     assert detect_runs(ds, 140, rs)[0].inrush_w is None
 
 
@@ -203,3 +204,14 @@ def test_delta_only_database_falls_back(tmp_path):
     det = Detector(db, tmp_path / "settings.db")
     det.recompute(100)
     assert det.runs[0].w == 2200 and det.runs[0].inrush_w is None
+
+
+def test_small_switch_beside_a_big_surge_does_not_block_sizing():
+    """A 125 W switch on one leg inside a 1.7 kW 240 V start's settle window (a real well pump case) is not
+    sizeable enough to make the window ambiguous; a switch of a sizeable fraction still is."""
+    from senseless.detect import Step, startup_candidates
+    big = Step(1000, 10.0, "both", 1706.0)
+    blip = Step(1000 + 8 * 60, 18.0, "L1", -125.0)
+    assert [s for s, _ in startup_candidates([big, blip])] == [big]
+    sizeable = Step(1000 + 8 * 60, 18.0, "L1", -400.0)
+    assert [s for s, _ in startup_candidates([big, sizeable])] == []

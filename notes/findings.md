@@ -353,3 +353,52 @@ From 5 minutes of feed in one house:
   An initial 1.95–2.17 s version allocated a temporary dataclass for every
   older-overlap check; passing combined watts directly removes that allocation
   while preserving the same matching results. All final timings are below 2 s.
+
+## 2026-10-16: Inrush review follow-up — identities and power evidence
+
+- **Verified with synthetic migration and replay:** recover run-to-pattern
+  associations before assigning resized runs. Named and ignored patterns move
+  to their members' settled upper median while keeping their IDs and user state.
+  Legacy settings reconstruct associations from reported shapes against the old
+  centres; later recomputes save associations in settings.db. The regression has
+  an L2 2230 W Pool pump beside a named 1000 W Heater, including a resized pump
+  run that exactly matches Heater's wattage. Heater cannot absorb pump members.
+  Restart, history expiry and subsequent pump activations preserve identity.
+  The real traffic replay with those two seeded legacy patterns moves Pool pump
+  to **901.1 W**, keeping its original pattern ID. Production settings were not
+  modified; the scratch settings reproduce the user-supplied production shape.
+- **Power rule, verified synthetically:** baseline slack is now
+  `min(300 W, 0.30 * load_w)`, including summed overlap. Independently paired
+  background offs can lower the baseline only after their observed closure and
+  only for loads already present throughout the pre-window. Preserve the actual
+  leg split for both-leg offs. Earlier dips and later starts cannot be excused by
+  that adjustment; shared hypotheses cannot supply background corrections.
+- **Replay of the same 5,655 deltas / 45,462 readings:** pool pump remains
+  **08:31:00–14:28:10, 901.1 W, 21,429.5 s, 5364.02 Wh**. The **12:51:49
+  L2 +764.2 W** start still sizes to **287.3 W**, but is now **unresolved**:
+  its former 14:12:03 closure and **384.16 Wh** disappear. Public shared-off
+  runs drop **37 → 23**, at **19 → 12** events; raw pairing has 24 shared
+  runs before one duration outlier is rejected. Nine public runs are surge-sized.
+- **Conservative well-pump change:** both-leg **13:13:12 +1706.7 W** now
+  encounters the **13:13:24 L1 −124.9 W** event in its settled window. The
+  conductor-aware guard skips resizing, so this probable appliance remains
+  **unresolved at 1706.7 W**, rather than closing at 793.1 W against the
+  13:15:33 −765.2 W off. Runtime/energy are unknown and counted as zero.
+  Recovering it needs evidence beyond this contaminated window; the appliance
+  label remains inferred from the replay context.
+- **Dryer and washer:** all **22** dryer-element runs keep wattage, end, status,
+  duration and energy (**2840.49 Wh**, 21 closed). Washer remains L1
+  **08:19:38–09:06:00**, **2782 s, 219.18 Wh**, with the same cycle ID and
+  peak. Fragment metadata changes: 117 → 122 candidate steps and 112 → 119
+  supporting runs. These are inferred program fragments, not labeled appliances.
+- **Validation:** all **19** review cases pass. Reverting each fix independently
+  yields **5 / 5 / 3 / 4 failures** for identities, slack, confirmed background
+  closures and conductor overlap, then restoration passes. Focused detector
+  suites: **200 passed**. Requested `uv sync -q && .venv/bin/python -m pytest -q`
+  with a writable temporary uv cache: **579 passed, 12 failed**; every failure
+  is the existing sandbox denial of localhost socket binding. Instruction
+  readiness validation and `git diff --check` pass.
+- **Supplied 48-hour benchmark:** **333,832 readings / 22,864 deltas**,
+  **0.58 / 0.59 / 0.58 s**, 128 MB maximum RSS. Real replay recompute is
+  **0.20 s**. Replay JSON, seeded migration settings and mutation logs remain
+  outside the repo in scratch/temporary storage; no raw capture was added here.

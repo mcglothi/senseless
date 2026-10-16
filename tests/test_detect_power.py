@@ -39,7 +39,7 @@ def test_newer_cycle_disproves_two_similar_loads_remaining_on_together():
     ds = [delta(0, 100), delta(600, -60), delta(1200, 105),
           delta(1800, -105), delta(18000, -100)]
     rs = readings(18010, lambda t: (125 if 1200 <= t < 1800 else 120, 900))
-    old, new = detect_runs(ds, 18010, rs)
+    old, new = detect_runs(ds, 18010, rs, startup_readings=[])
     assert old.status == "unresolved" and old.end_frame is None
     assert new.status == "closed" and new.duration_s(0) == 600
 
@@ -65,7 +65,7 @@ def test_invalid_newest_candidate_does_not_steal_off_from_supported_older_on():
     ds = [delta(0, 100), delta(10, 125), delta(100, -110)]
     rs = readings(110, lambda t: (90 if 40 <= t < 70 else 250, 900))
     # No covered pre-window: this exercises the absolute fallback. With a
-    # baseline, the 300 W allowance deliberately tolerates this tiny change.
+    # baseline, this instead exercises the baseline-relative floor.
     rs = [r for r in rs if r["ts"] >= 10]
     old, new = detect_runs(ds, 110, rs)
     assert old.status == "closed" and old.duration_s(0) == 100

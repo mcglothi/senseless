@@ -35,7 +35,7 @@ STAGE_FRAMES = 120       # 2 s at 60 Hz (microwave stages: 90 cycles apart)
 PAIR_TOL = 0.15          # off step within 15% (or PAIR_ABS_W) of the on step
 INRUSH_PAIR_TOL = 0.20   # settled rise is an estimate, unlike a reported plain on
 PAIR_ABS_W = 20
-SLACK_W = 300           # allow unrelated background loads to switch off
+SLACK_W = 300           # background uncertainty, also bounded to 30% of the load
 SHARED_OFF_CAP = 12      # at most 66 pairs per unmatched off; 0 disables shared offs
 SHARED_START_S = 600     # shared timer/strip loads must start within ten minutes
 MAX_RUN_S = 6 * 3600
@@ -45,6 +45,7 @@ PRUNE_AFTER_S = 7 * 86400   # unnamed patterns unseen this long are deleted
 FPS = 60
 INRUSH_MIN_W = 300
 INRUSH_OVERLAP_W = 120
+INRUSH_OVERLAP_SHARE = 0.15   # a switch elsewhere only muddies the settled window if it's sizeable next to this load
 INRUSH_RATIO = .8
 INRUSH_COVERAGE = .7
 
@@ -56,6 +57,7 @@ class Step:
     legs: str            # "L1" | "L2" | "both"
     w: float             # signed total
     stages: list = field(default_factory=list)  # [(frame offset, w)] for multi-stage ons
+    leg_w: dict | None = None  # observed split of a both-leg step, for background offs
 
 
 @dataclass
@@ -111,7 +113,8 @@ def to_steps(deltas: list[dict]) -> list[Step]:
         b = next((d for d in group if d["channel"] == 1), None)
         if a and b and math.copysign(1, a["w"]) == math.copysign(1, b["w"]) and \
                 abs(abs(a["w"]) - abs(b["w"])) / max(abs(a["w"]), abs(b["w"])) <= PAIR_240_TOL:
-            steps.append(Step(frame, a["ts"], "both", a["w"] + b["w"]))
+            steps.append(Step(frame, a["ts"], "both", a["w"] + b["w"],
+                              leg_w={"L1": a["w"], "L2": b["w"]}))
             rest = [d for d in group if d is not a and d is not b]
         else:
             rest = group
@@ -149,7 +152,7 @@ def _compatible(on: Run, off: Step) -> bool:
 
 
 def startup_candidates(steps: list[Step]):
-    """Unambiguous >=300 W ons, using the detector's exact L1/L2/both leg categories.
+    """Unambiguous >=300 W ons, checking every event on shared conductors.
 
     Merged startup stages belong to the candidate itself. Their last frame anchors
     the settled window, while the baseline stays before the first stage.
@@ -157,7 +160,9 @@ def startup_candidates(steps: list[Step]):
     switching = {leg: [] for leg in ("L1", "L2", "both")}
     for i, s in enumerate(steps):
         if abs(s.w) >= INRUSH_OVERLAP_W:
-            switching[s.legs].extend((s.frame + offset, i) for offset, _ in (s.stages or [(0, s.w)]))
+            for leg in switching:
+                if leg == s.legs or "both" in (leg, s.legs):
+                    switching[leg].extend((s.frame + offset, i) for offset, _ in (s.stages or [(0, s.w)]))
     for events in switching.values():
         events.sort()
     for i, s in enumerate(steps):
@@ -168,7 +173,9 @@ def startup_candidates(steps: list[Step]):
         events = switching[s.legs]
         lo = bisect_right(events, (s.frame, math.inf))
         hi = bisect_right(events, (stop, math.inf))
-        if not any(j != i for _, j in events[lo:hi]):
+        # a small switch (a 125 W blip beside a 1.7 kW well pump) doesn't make the settled window ambiguous
+        floor = max(INRUSH_OVERLAP_W, INRUSH_OVERLAP_SHARE * s.w)
+        if not any(j != i and abs(steps[j].w) >= floor for _, j in events[lo:hi]):
             yield s, last
 
 
@@ -265,6 +272,8 @@ class PowerEvidence:
         bins = readings if readings and "bin_start" in readings[0] else bin_readings(readings)
         self.startup = startup
         self.baselines = {}
+        self.closed_frames = []
+        self.closures = []
         self.frames = [b["bin_start"] for b in bins]
         powers = {leg: [b[leg] for b in bins] for leg in ("L1", "L2", "both")}
         # Segment trees keep each candidate check logarithmic rather than
@@ -277,24 +286,24 @@ class PowerEvidence:
                 tree[i] = min(tree[2 * i], tree[2 * i + 1])
             self.trees[leg] = tree
 
-    def contradicts(self, run: Run, end_frame: int, *, baseline_run: Run | None = None,
-                    combined_w: float | None = None) -> bool:
-        # Leave startup/stages and the candidate off's own transition out.
-        start = run.start_frame + run.stages[-1][0] + STAGE_FRAMES
-        stop = end_frame - STAGE_FRAMES - POWER_BIN_FRAMES
+    def confirmed_off(self, run: Run, off: Step) -> None:
+        """Only independently paired offs can remove a known baseline component.
+
+        Preserve the observed conductor split; a both-leg total cannot safely be
+        subtracted from a single leg. Shared-off hypotheses do not establish it.
+        """
+        values = {run.legs: run.w}
+        if run.legs == "both" and off.leg_w:
+            values.update({leg: run.w * abs(w / off.w) for leg, w in off.leg_w.items()})
+        elif run.legs != "both":
+            values["both"] = run.w
+        self.closed_frames.append(off.frame)
+        self.closures.append((run.start_frame + run.stages[-1][0], values))
+
+    def _below(self, legs: str, start: int, stop: int, floor: float) -> bool:
         lo = bisect_left(self.frames, start) + self.n
         hi = bisect_right(self.frames, stop) + self.n
-        anchor = baseline_run if baseline_run is not None else run
-        key = (anchor.start_frame, anchor.legs)
-        if key not in self.baselines:
-            self.baselines[key] = self.startup.mean(
-                anchor.start_frame - 12 * FPS, anchor.start_frame - 2 * FPS, anchor.legs
-            ) if self.startup is not None else None
-        pre = self.baselines[key]
-        w = run.w if combined_w is None else combined_w
-        floor = (pre + .85 * w - SLACK_W if pre is not None else
-                 w - max(PAIR_TOL * w, PAIR_ABS_W))
-        tree = self.trees[run.legs]
+        tree = self.trees[legs]
         while lo < hi:
             if lo % 2:
                 if tree[lo] < floor:
@@ -307,6 +316,42 @@ class PowerEvidence:
             lo //= 2
             hi //= 2
         return False
+
+    def contradicts(self, run: Run, end_frame: int, *, baseline_run: Run | None = None,
+                    combined_w: float | None = None) -> bool:
+        # Leave startup/stages and the candidate off's own transition out.
+        start = run.start_frame + run.stages[-1][0] + STAGE_FRAMES
+        stop = end_frame - STAGE_FRAMES - POWER_BIN_FRAMES
+        anchor = baseline_run if baseline_run is not None else run
+        key = (anchor.start_frame, anchor.legs)
+        if key not in self.baselines:
+            self.baselines[key] = self.startup.mean(
+                anchor.start_frame - 12 * FPS, anchor.start_frame - 2 * FPS, anchor.legs
+            ) if self.startup is not None else None
+        pre = self.baselines[key]
+        w = run.w if combined_w is None else combined_w
+        floor = (pre + .85 * w - min(SLACK_W, .30 * w) if pre is not None else
+                 w - max(PAIR_TOL * w, PAIR_ABS_W))
+        if pre is None:
+            return self._below(run.legs, start, stop, floor)
+        # A baseline may include an older appliance which has since closed.
+        # Split the evidence interval at confirmed offs: compensation must never
+        # conceal an earlier return to baseline or a load that started later.
+        a = bisect_left(self.closed_frames, anchor.start_frame - 2 * FPS)
+        b = bisect_right(self.closed_frames, stop)
+        removed = 0.0
+        for i in range(a, b):
+            last_stage, values = self.closures[i]
+            drop = values.get(run.legs, 0)
+            if not drop or last_stage > anchor.start_frame - 12 * FPS:
+                continue
+            end = self.closed_frames[i]
+            if self._below(run.legs, start, end - POWER_BIN_FRAMES, floor - min(pre, removed)):
+                return True
+            # Exclude a bin straddling the observed off, as for candidate offs.
+            start = max(start, end)
+            removed += drop
+        return self._below(run.legs, start, stop, floor - min(pre, removed))
 
 
 def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = None,
@@ -369,6 +414,7 @@ def pair_runs(steps: list[Step], now_ts: float, readings: list[dict] | None = No
             buckets[b].remove((i, r))
             opened.pop(i, None)
             if power is not None:
+                power.confirmed_off(r, s)
                 # A completed newer cycle can disprove an older similar on:
                 # during their supposed overlap the leg must support BOTH loads.
                 # Retire the stale candidate, never manufacture an off for it.
@@ -499,6 +545,13 @@ class Patterns:
                 db.execute("ALTER TABLE patterns ADD COLUMN last_seen REAL")
             if "inrush_w" not in cols:
                 db.execute("ALTER TABLE patterns ADD COLUMN inrush_w REAL")
+            db.execute("""CREATE TABLE IF NOT EXISTS pattern_runs (
+                generation INTEGER NOT NULL, start_frame INTEGER NOT NULL, legs TEXT NOT NULL,
+                start_ts REAL NOT NULL, pattern INTEGER NOT NULL, w REAL NOT NULL,
+                PRIMARY KEY (generation, start_frame, legs))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS pattern_surges (
+                pattern INTEGER PRIMARY KEY, w REAL NOT NULL)""")
+            db.execute("INSERT OR IGNORE INTO pattern_surges SELECT id, inrush_w FROM patterns WHERE inrush_w IS NOT NULL")
 
     @contextmanager
     def _conn(self):
@@ -517,19 +570,69 @@ class Patterns:
     def _snapshot(self, db) -> list[dict]:
         return [dict(r) for r in db.execute("SELECT * FROM patterns")]
 
+    @staticmethod
+    def _nearest(pats, legs, stages, w):
+        eligible = [p for p in pats if p["legs"] == legs and p["stages"] == stages
+                    and abs(w - p["center_w"]) <= CLUSTER_TOL * p["center_w"]]
+        return min(eligible, key=lambda p: abs(w - p["center_w"]) / p["center_w"], default=None)
+
+    def _surge_identities(self, db, pats, runs, persist):
+        """Recover pre-resize membership, then migrate centres before clustering.
+
+        Old settings contain no run membership. Reconstruct those associations
+        from the historical reported shape against the *unmodified* snapshot,
+        never from the new settled watts. Subsequent recomputes/restarts use the
+        saved run key and size, even if a different named centre is now nearer.
+        """
+        saved = {(r["generation"], r["start_frame"], r["legs"]): r
+                 for r in db.execute("SELECT * FROM pattern_runs")}
+        surges = {r["pattern"]: r["w"] for r in db.execute("SELECT * FROM pattern_surges")}
+        by_id = {p["id"]: p for p in pats}
+        identities, migrated, members = {}, set(), {}
+        for r in runs:
+            if r.inrush_w is None:
+                continue
+            key = (r.generation, r.start_frame, r.legs)
+            old = saved.get(key)
+            if old is not None and old["start_ts"] == r.start_ts and old["pattern"] in by_id:
+                p, old_w = by_id[old["pattern"]], old["w"]
+            else:
+                p = self._nearest(pats, r.legs, min(len(r.stages), 2), r.inrush_w)
+                old_w = r.inrush_w
+                if p is None:
+                    # A new activation of an already migrated appliance can use
+                    # its recorded surge signature as well as its settled size.
+                    p = self._nearest([p for p in pats if p["id"] in surges
+                                       and abs(r.inrush_w - surges[p["id"]]) <= CLUSTER_TOL * surges[p["id"]]],
+                                      r.legs, min(len(r.stages), 2), r.w)
+                    old_w = r.w
+            if p is None:
+                continue
+            identities[key] = p
+            members.setdefault(p["id"], []).append(r.w)
+            if r.w < INRUSH_RATIO * old_w:
+                migrated.add(p["id"])
+        if persist:
+            for pid in migrated:
+                p = by_id[pid]
+                p["center_w"] = sorted(members[pid])[len(members[pid]) // 2]
+                db.execute("UPDATE patterns SET center_w=? WHERE id=?", (p["center_w"], pid))
+        return identities
+
     def assign(self, runs: list[Run], *, persist: bool = True) -> None:
         """Assign shapes; cycle-only evidence uses temporary IDs without changing run patterns."""
         with self._write, self._conn() as db:
             pats = self._snapshot(db)
+            identities = self._surge_identities(db, pats, runs, persist)
             for r in runs:
                 stages = min(len(r.stages), 2)  # 1 = single step, 2 = multi-stage
-                best, best_err = None, None
-                for p in pats:
-                    if p["legs"] != r.legs or p["stages"] != stages:
-                        continue
-                    err = abs(r.w - p["center_w"]) / p["center_w"]
-                    if err <= CLUSTER_TOL and (best_err is None or err < best_err):
-                        best, best_err = p, err
+                best = identities.get((r.generation, r.start_frame, r.legs))
+                if best is None:
+                    # An unassociated surge must not acquire another appliance's
+                    # name/ignore state just because its new wattage is nearby.
+                    eligible = [p for p in pats if r.inrush_w is None or not (
+                        p.get("name") or p.get("ignored"))]
+                    best = self._nearest(eligible, r.legs, stages, r.w)
                 if best is None:
                     if persist:
                         cur = db.execute("INSERT INTO patterns (legs, stages, center_w, n, created) VALUES (?,?,?,?,?)",
@@ -542,6 +645,11 @@ class Patterns:
                 r.pattern = best["id"]
             if not persist:
                 return
+            db.executemany("INSERT OR REPLACE INTO pattern_runs VALUES (?,?,?,?,?,?)",
+                           [(r.generation, r.start_frame, r.legs, r.start_ts, r.pattern, r.w) for r in runs])
+            if runs:
+                db.execute("DELETE FROM pattern_runs WHERE start_ts < ?",
+                           (max(r.start_ts for r in runs) - WINDOW_S,))
             # refresh centres (unnamed only) and counts from this window's runs
             by_id: dict[int, list[Run]] = {}
             for r in runs:
@@ -555,11 +663,17 @@ class Patterns:
                     p["center_w"] = sorted(x.w for x in rs)[len(rs) // 2]  # median
                 # the name guard is in SQL: a name set by the API after our snapshot still freezes the centre
                 surges = [x.inrush_w for x in rs if x.inrush_w is not None]
+                if surges:
+                    # Keep the identifying signature after the public window's
+                    # inrush median becomes null and run associations expire.
+                    db.execute("INSERT OR REPLACE INTO pattern_surges VALUES (?,?)",
+                               (p["id"], median(surges)))
                 db.execute("UPDATE patterns SET center_w = CASE WHEN name IS NULL THEN ? ELSE center_w END, n=?, last_seen=?, inrush_w=? WHERE id=?",
                            (p["center_w"], len(rs), max(x.start_ts for x in rs), median(surges) if surges else None, p["id"]))
             # one-off sizes (noise, rare coincidences) would otherwise pile up forever
             db.execute("DELETE FROM patterns WHERE name IS NULL AND ignored=0 AND n=0 AND coalesce(last_seen, created) < ?",
                        (time.time() - PRUNE_AFTER_S,))
+            db.execute("DELETE FROM pattern_surges WHERE pattern NOT IN (SELECT id FROM patterns)")
 
     def name(self, pattern_id: int, name: str | None) -> dict:
         name = (name or "").strip()[:60] or None
