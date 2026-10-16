@@ -62,6 +62,7 @@ export function BillView() {
               <span style={{ fontSize: 56, fontWeight: 700, color: C.bright, letterSpacing: -1.5, fontVariantNumeric: 'tabular-nums' }}>{usd(shown)}</span>
               <span style={{ fontFamily: MONO, fontSize: 12, color: C.muted }}>{fmtInt(c.kwh_projected)} kWh · {proj?.effective_cents_per_kwh}¢/kWh all-in</span>
             </div>
+            {c.missing_days?.length > 0 && <div style={small}>Sense has no total for {c.missing_days.length} day{c.missing_days.length > 1 ? 's' : ''} this cycle; counted at the recent daily rate.</div>}
             {proj?.calibrated_total != null && <div style={small}>Adjusted ×{c.calibration} to match your entered bills (unadjusted {usd(proj.total)}).</div>}
             <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', fontFamily: MONO, fontSize: 12, color: C.body }}>
               <span>So far <b style={{ color: C.bright }}>{usd(c.so_far?.total)}</b> · {fmtInt(c.kwh_so_far)} kWh</span>
@@ -164,12 +165,14 @@ function DailyBars({ cycle }) {
 }
 
 function Bills({ b }) {
-  const [form, setForm] = useState({ start: '', end: '', kwh: '', amount: '' })
+  const [form, setForm] = useState({ start: '', end: '', kwh: '', amount: '', on: '' })
+  const tou = !!b.config?.plans[b.config.settings.plan]?.tou
   const submit = async e => {
     e.preventDefault()
     try {
-      await b.addBill({ start: form.start, end: form.end, kwh: Number(form.kwh), amount: Number(form.amount) })
-      setForm({ start: '', end: '', kwh: '', amount: '' })
+      await b.addBill({ start: form.start, end: form.end, kwh: Number(form.kwh), amount: Number(form.amount),
+        ...(form.on.trim() !== '' ? { on_peak_kwh: Number(form.on) } : {}) })
+      setForm({ start: '', end: '', kwh: '', amount: '', on: '' })
       toast('Bill added')
     } catch (err) { toast(err.message) }
   }
@@ -182,8 +185,9 @@ function Bills({ b }) {
         <div key={x.id} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 10, alignItems: 'center', fontFamily: MONO, fontSize: 12,
           borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
           <span style={{ color: C.body }}>{fmtDate(x.start)} → {fmtDate(x.end)} · {fmtInt(x.kwh)} kWh</span>
-          <span style={{ color: C.bright }}>{usd(x.amount)} <span style={{ color: Math.abs(x.ratio - 1) < 0.05 ? C.green : C.amber }}>
-            (est. {usd(x.estimate)}, {x.diff >= 0 ? '+' : ''}{usd(x.diff)})</span></span>
+          <span style={{ color: C.bright }}>{usd(x.amount)} {x.estimate == null
+            ? <span style={{ color: C.dim }}>(add its on-peak kWh to compare)</span>
+            : <span style={{ color: Math.abs(x.ratio - 1) < 0.05 ? C.green : C.amber }}>(est. {usd(x.estimate)}, {x.diff >= 0 ? '+' : ''}{usd(x.diff)})</span>}</span>
           <button type="button" aria-label={`Remove bill ${x.start}`} onClick={() => b.removeBill(x.id).catch(e => toast(e.message))}
             style={{ width: 32, height: 32, borderRadius: 8, cursor: 'pointer', background: 'transparent', color: C.dim, border: `1px solid ${C.line2}` }}>×</button>
         </div>
@@ -193,6 +197,7 @@ function Bills({ b }) {
         <Field label="To"><input type="date" required value={form.end} onChange={set('end')} style={input} /></Field>
         <Field label="kWh"><input type="number" required min="1" step="any" inputMode="decimal" value={form.kwh} onChange={set('kwh')} style={input} /></Field>
         <Field label="Total $"><input type="number" required min="0.01" step="0.01" inputMode="decimal" value={form.amount} onChange={set('amount')} style={input} /></Field>
+        {tou && <Field label="On-peak kWh"><input type="number" min="0" step="any" inputMode="decimal" value={form.on} onChange={set('on')} style={input} /></Field>}
         <button type="submit" style={{ ...input, cursor: 'pointer', color: C.bg, background: C.accent, border: `1px solid ${C.accent}`, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1, fontSize: 12 }}>Add bill</button>
       </form>
     </section>
@@ -206,8 +211,10 @@ function Settings({ config, save }) {
   const num = (k, scale = 1) => (draft?.[k] ?? String(Number((s[k] * scale).toFixed(6))))   // 0.12721*100 is 12.720999…
   const commit = (k, scale = 1) => {
     if (draft?.[k] == null) return
-    const v = Number(draft[k]) / scale
+    const raw = String(draft[k]).trim()
     setDraft(d => ({ ...d, [k]: null }))
+    if (raw === '') return            // a cleared field means "not decided yet", never zero
+    const v = Number(raw) / scale
     if (Number.isFinite(v) && v !== s[k]) save({ [k]: k === 'billing_day' || k === 'tax_exempt_kwh' ? Math.round(v) : v })
   }
   const edit = k => e => setDraft(d => ({ ...d, [k]: e.target.value }))
@@ -252,7 +259,10 @@ function Settings({ config, save }) {
 
 function CustomPlan({ s, save }) {
   const [f, setF] = useState({ fixed: s.custom.fixed, fixed_kwh: s.custom.fixed_kwh, delivery: s.custom.delivery * 100 })
-  const commit = () => save({ custom: { fixed: Number(f.fixed), fixed_kwh: Math.round(Number(f.fixed_kwh)), delivery: Number(f.delivery) / 100 } })
+  const commit = () => {
+    if ([f.fixed, f.fixed_kwh, f.delivery].some(v => String(v).trim() === '' || !Number.isFinite(Number(v)))) return
+    save({ custom: { fixed: Number(f.fixed), fixed_kwh: Math.round(Number(f.fixed_kwh)), delivery: Number(f.delivery) / 100 } })
+  }
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
       <Field label="Fixed $/month"><input type="number" step="0.01" value={f.fixed} onChange={e => setF({ ...f, fixed: e.target.value })} onBlur={commit} style={input} /></Field>

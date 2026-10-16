@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 
 from aiohttp import web
@@ -247,11 +248,14 @@ def make_app(st: LiveState, db_path: Path, appearance: Appearance | None = None,
             return web.json_response(await asyncio.to_thread(summary.today, db_path, cost))
 
         def run():
-            # your tariff, not Sense's flat rate: energy at the marginal rate plus today's share of the fixed charge
+            # your tariff, not Sense's flat rate: energy at this cycle's marginal rate (time-of-use by hour)
+            # plus today's share of the fixed charge
             r = billing.rates()
             body = summary.today(db_path, r["marginal_cents_per_kwh"])
-            if body["cost"] is not None:
-                body["cost"] = round(body["cost"] + r["fixed_per_day"] * min(1.0, (time.time() - body["since"]) / 86400), 2)
+            if body["kwh"]:
+                day = datetime.fromtimestamp(body["since"], summary.local_tz()).date()
+                energy, r = billing.price_today(body["kwh"], body["hourly_w"], day)
+                body["cost"] = round(energy + r["fixed_per_day"] * min(1.0, (time.time() - body["since"]) / 86400), 2)
             body["cost_basis"] = r["plan_label"]
             body["fixed_per_day"] = r["fixed_per_day"]
             return body

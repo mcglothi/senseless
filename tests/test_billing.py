@@ -24,8 +24,12 @@ def test_tax_above_exempt_kwh_and_marginal_rate():
     before = 27.37 + 1150 * 0.119590 + 1200 * 0.12721
     assert b["tax"] == pytest.approx(before * (450 / 1200) * 0.055, abs=0.01)
     assert b["total"] == pytest.approx(before + b["tax"], abs=0.01)
-    assert b["marginal_cents_per_kwh"] == pytest.approx((0.119590 + 0.12721) * 1.055 * 100, abs=0.01)
+    # marginal = what the 1,201st kWh adds to this bill (its delivery+supply, taxed, plus the taxable share growing)
+    total = lambda k: (27.37 + (k - 50) * 0.119590 + k * 0.12721) * (1 + max(0, k - 750) / k * 0.055)
+    assert b["marginal_cents_per_kwh"] == pytest.approx((total(1201) - total(1200)) * 100, abs=0.01)
     assert estimate(s, 500)["marginal_cents_per_kwh"] == pytest.approx((0.119590 + 0.12721) * 100, abs=0.01)
+    # inside the fixed charge's 50 kWh, another kWh only adds supply
+    assert estimate(s, 10)["marginal_cents_per_kwh"] == pytest.approx(12.721, abs=0.01)
 
 
 def test_time_of_use_and_custom_plans():
@@ -91,7 +95,7 @@ def test_settings_validation(tmp_path):
 def test_bills_check_and_calibration(tmp_path):
     clock = datetime(2026, 10, 16, 12, 0, tzinfo=local_tz()).timestamp()
     b = Billing(tmp_path / "s.db", FakeHistory(), clock=lambda: clock)
-    est = estimate(b.settings(), 1200, months=30 / 30.44)["total"]
+    est = estimate(b.settings(), 1200)["total"]   # a 30-day bill is one month of fixed charge and allowances
     row = b.add_bill({"start": "2026-09-01", "end": "2026-10-01", "kwh": 1200, "amount": round(est * 1.1, 2)})
     assert row["ratio"] == pytest.approx(1.1, abs=0.002) and row["diff"] == pytest.approx(est * 0.1, abs=0.02)
     assert b.calibration() == pytest.approx(1.1, abs=0.002)
@@ -142,3 +146,56 @@ def test_today_cost_uses_the_tariff(tmp_path):
             t = await (await c.get("/api/today")).json()
             assert t["cost_cents_per_kwh"] == bill.rates()["marginal_cents_per_kwh"] and t["cost_basis"].startswith("CMP Rate A")
     asyncio.run(go())
+
+
+def test_bill_months_and_tou_bills(tmp_path):
+    from senseless.billing import bill_months
+    assert bill_months(date(2026, 2, 1), date(2026, 3, 1)) == 1.0     # February is still one bill
+    assert bill_months(date(2026, 9, 1), date(2026, 9, 16)) == pytest.approx(15 / 30.44)
+    b = Billing(tmp_path / "s.db")
+    b.update({"plan": "cmp-a-tou"})
+    a = b.add_bill({"start": "2026-09-01", "end": "2026-10-01", "kwh": 1000, "amount": 250})
+    assert a["estimate"] is None and b.calibration() is None             # no on-peak kWh: not guessed
+    c = b.add_bill({"start": "2026-08-01", "end": "2026-09-01", "kwh": 1000, "amount": 250, "on_peak_kwh": 0})
+    assert c["estimate"] == estimate(b.settings(), 1000, 0, "cmp-a-tou")["total"]
+    with pytest.raises(BillingError):
+        b.add_bill({"start": "2026-07-01", "end": "2026-08-01", "kwh": 10, "amount": 5, "on_peak_kwh": 11})
+
+
+class GappyHistory(FakeHistory):
+    """Like FakeHistory but Oct 5 is missing, and asking for a future month fails like the real History."""
+
+    def get(self, scale, d):
+        day = date.fromisoformat(d)
+        if day > date(2026, 10, 16):
+            raise AssertionError(f"asked for the future: {d}")
+        body = super().get(scale, d)
+        if scale == "month" and day.month == 10:
+            body["kwh"][4] = None
+        return body
+
+
+def test_cycle_spanning_months_and_missing_days(tmp_path):
+    clock = datetime(2026, 10, 16, 12, 0, tzinfo=local_tz()).timestamp()
+    b = Billing(tmp_path / "s.db", GappyHistory(), clock=lambda: clock)
+    b.update({"billing_day": 10})                 # Oct 10 -> Nov 10: November hasn't started
+    c = b.cycle()
+    assert (c["start"], c["end"]) == ("2026-10-10", "2026-11-10")
+    b.update({"billing_day": 1})
+    c = b.cycle()
+    assert c["missing_days"] == ["2026-10-05"]
+    assert c["kwh_so_far"] == 15 * 40
+    assert c["kwh_projected"] == pytest.approx(15 * 40 + 40 + 40 * (31 - 15.5), abs=0.1)   # the gap is filled, not lost
+
+
+def test_tou_today_priced_by_hour(tmp_path):
+    clock = datetime(2026, 10, 16, 12, 0, tzinfo=local_tz()).timestamp()
+    b = Billing(tmp_path / "s.db", FakeHistory(), clock=lambda: clock)
+    b.update({"plan": "cmp-a-tou"})
+    b.cycle()
+    r = b.rates()
+    thursday = date(2026, 10, 15)
+    all_off = b.price_today(10, [500 if h < 17 else 0 for h in range(24)], thursday)[0]
+    all_on = b.price_today(10, [500 if 17 <= h < 21 else 0 for h in range(24)], thursday)[0]
+    assert all_off == pytest.approx(10 * r["marginal_off_cents"] / 100) and all_on == pytest.approx(10 * r["marginal_on_cents"] / 100)
+    assert all_on > 2.5 * all_off   # (42.88 + 12.72)¢ vs (6.15 + 12.72)¢

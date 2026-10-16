@@ -71,35 +71,51 @@ def plan_for(settings: dict, plan_id: str | None = None) -> dict:
     return p
 
 
+def _total(p: dict, settings: dict, kwh: float, on: float | None, months: float) -> dict:
+    fixed = p["fixed"] * months
+    if p["tou"]:
+        on = min(max(on, 0.0), kwh)
+        delivery = on * p["tou"]["on"] + (kwh - on) * p["tou"]["off"]
+    else:
+        delivery = max(0.0, kwh - p["fixed_kwh"] * months) * p["delivery"]
+    supply = kwh * settings["supply_per_kwh"]
+    before_tax = fixed + delivery + supply
+    # the exemption covers the first N kWh of energy and delivery alike: tax the share above it
+    exempt = settings["tax_exempt_kwh"] * months
+    taxable_share = max(0.0, kwh - exempt) / kwh if kwh > 0 else 0.0
+    tax = before_tax * taxable_share * settings["tax_rate"]
+    return {"fixed": fixed, "delivery": delivery, "supply": supply, "tax": tax, "total": before_tax + tax}
+
+
 def estimate(settings: dict, kwh: float, on_peak_kwh: float | None = None, plan_id: str | None = None,
              months: float = 1.0) -> dict:
-    """One bill for `kwh` used over `months` (1 = a normal cycle; fixed charge and tax exemption scale)."""
+    """One bill for `kwh` used over `months` (1 = a normal cycle; fixed charge, included kWh and the tax
+    exemption scale). The marginal rate is what one more kWh would add to this same bill."""
     if kwh < 0:
         raise BillingError("kwh must not be negative")
     p = plan_for(settings, plan_id)
-    fixed = p["fixed"] * months
-    if p["tou"]:
-        if on_peak_kwh is None:
-            raise BillingError("time-of-use needs on_peak_kwh (or an on-peak share)")
-        on = min(max(on_peak_kwh, 0.0), kwh)
-        delivery_kwh = on * p["tou"]["on"] + (kwh - on) * p["tou"]["off"]
-    else:
-        delivery_kwh = max(0.0, kwh - p["fixed_kwh"] * months) * p["delivery"]
-    supply = kwh * settings["supply_per_kwh"]
-    before_tax = fixed + delivery_kwh + supply
-    exempt = settings["tax_exempt_kwh"] * months
-    # the exemption covers the first N kWh of energy and delivery alike: tax the share above it
-    taxable_share = max(0.0, kwh - exempt) / kwh if kwh > 0 else 0.0
-    tax = before_tax * taxable_share * settings["tax_rate"]
-    total = before_tax + tax
-    marginal = (p["delivery"] if not p["tou"] else delivery_kwh / kwh if kwh else p["tou"]["off"]) + settings["supply_per_kwh"]
-    if kwh > exempt:
-        marginal *= 1 + settings["tax_rate"]
+    if p["tou"] and on_peak_kwh is None:
+        raise BillingError("time-of-use needs on_peak_kwh (or an on-peak share)")
+    t = _total(p, settings, kwh, on_peak_kwh, months)
     r2 = lambda x: round(x, 2)
-    return {"plan": p["id"], "plan_label": p["label"], "kwh": round(kwh, 2), "on_peak_kwh": round(on_peak_kwh, 2) if p["tou"] else None,
-            "fixed": r2(fixed), "delivery": r2(delivery_kwh), "supply": r2(supply), "tax": r2(tax), "total": r2(total),
-            "effective_cents_per_kwh": round(total / kwh * 100, 2) if kwh else None,
-            "marginal_cents_per_kwh": round(marginal * 100, 2)}
+    out = {"plan": p["id"], "plan_label": p["label"], "kwh": round(kwh, 2), "on_peak_kwh": round(on_peak_kwh, 2) if p["tou"] else None,
+           "fixed": r2(t["fixed"]), "delivery": r2(t["delivery"]), "supply": r2(t["supply"]), "tax": r2(t["tax"]), "total": r2(t["total"]),
+           "effective_cents_per_kwh": round(t["total"] / kwh * 100, 2) if kwh else None}
+    if p["tou"]:
+        share = on_peak_kwh / kwh if kwh else 0.0
+        on = _total(p, settings, kwh + 1, on_peak_kwh + 1, months)["total"] - t["total"]
+        off = _total(p, settings, kwh + 1, on_peak_kwh, months)["total"] - t["total"]
+        out.update(marginal_cents_per_kwh=round((share * on + (1 - share) * off) * 100, 2),
+                   marginal_on_cents=round(on * 100, 2), marginal_off_cents=round(off * 100, 2))
+    else:
+        out["marginal_cents_per_kwh"] = round((_total(p, settings, kwh + 1, None, months)["total"] - t["total"]) * 100, 2)
+    return out
+
+
+def bill_months(start: date, end: date) -> float:
+    """A normal monthly bill (26-35 days) is one month of fixed charge and allowances; others prorate."""
+    days = (end - start).days
+    return 1.0 if 26 <= days <= 35 else days / 30.44
 
 
 def cycle_bounds(billing_day: int, today: date) -> tuple[date, date]:
@@ -127,6 +143,8 @@ class Billing:
             db.execute("""CREATE TABLE IF NOT EXISTS bills (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, start TEXT NOT NULL, end TEXT NOT NULL,
                 kwh REAL NOT NULL, amount REAL NOT NULL, created REAL NOT NULL)""")
+            if "on_peak_kwh" not in {r[1] for r in db.execute("PRAGMA table_info(bills)")}:
+                db.execute("ALTER TABLE bills ADD COLUMN on_peak_kwh REAL")
 
     @contextmanager
     def _conn(self):
@@ -190,9 +208,14 @@ class Billing:
         s = self.settings()
         with self._conn() as db:
             rows = [dict(r) for r in db.execute("SELECT * FROM bills ORDER BY start DESC")]
+        tou = bool(plan_for(s)["tou"])
         for b in rows:
-            months = max(1, (date.fromisoformat(b["end"]) - date.fromisoformat(b["start"])).days) / 30.44
-            est = estimate(s, b["kwh"], on_peak_kwh=b["kwh"] * 0.15 if plan_for(s)["tou"] else None, months=months)
+            months = bill_months(date.fromisoformat(b["start"]), date.fromisoformat(b["end"]))
+            if tou and b.get("on_peak_kwh") is None:
+                # can't price a time-of-use bill without its on-peak kWh: shown, but not compared or calibrated
+                b["estimate"] = b["diff"] = b["ratio"] = None
+                continue
+            est = estimate(s, b["kwh"], on_peak_kwh=b.get("on_peak_kwh") if tou else None, months=months)
             b["estimate"] = est["total"]
             b["diff"] = round(b["amount"] - est["total"], 2)
             b["ratio"] = round(b["amount"] / est["total"], 3) if est["total"] else None
@@ -205,12 +228,15 @@ class Billing:
             raise BillingError("start and end must be YYYY-MM-DD") from None
         if not 7 <= (end - start).days <= 62:
             raise BillingError("a bill covers 7 to 62 days")
-        kwh, amount = body.get("kwh"), body.get("amount")
+        kwh, amount, on = body.get("kwh"), body.get("amount"), body.get("on_peak_kwh")
         if not _num(kwh) or not 0 < kwh < 100000 or not _num(amount) or not 0 < amount < 100000:
             raise BillingError("kwh and amount must be positive numbers")
+        if on is not None and (not _num(on) or not 0 <= on <= kwh):
+            raise BillingError("on_peak_kwh must be a number from 0 to kwh")
         with self._conn() as db:
-            cur = db.execute("INSERT INTO bills (start, end, kwh, amount, created) VALUES (?,?,?,?,?)",
-                             (start.isoformat(), end.isoformat(), float(kwh), float(amount), time.time()))
+            cur = db.execute("INSERT INTO bills (start, end, kwh, amount, created, on_peak_kwh) VALUES (?,?,?,?,?,?)",
+                             (start.isoformat(), end.isoformat(), float(kwh), float(amount), time.time(),
+                              float(on) if on is not None else None))
             bid = cur.lastrowid
         return next(b for b in self.bills() if b["id"] == bid)
 
@@ -230,7 +256,7 @@ class Billing:
         out: dict[date, float] = {}
         sense_cents = 0.0
         months, d = [], start.replace(day=1)
-        while d < end:
+        while d < end and d <= today:      # History refuses future periods
             months.append(d)
             d = (d + timedelta(days=32)).replace(day=1)
         for m in months:
@@ -243,11 +269,12 @@ class Billing:
                     sense_cents += cents[i] if i < len(cents) and cents[i] is not None else 0
         return out, sense_cents
 
-    def _on_peak_share(self, tou: dict, days: list[date], today: date) -> tuple[float | None, int]:
-        """Share of kWh in on-peak hours over recent complete days (hourly from Sense's day history)."""
+    def _on_peak_share(self, tou: dict, today: date) -> tuple[float | None, int]:
+        """Share of kWh in on-peak hours over the 7 days before today (one full week, so weekdays and the
+        weekend are mixed as they will be; days before the cycle count too). Hourly from Sense's history."""
         on = total = 0.0
         n = 0
-        for d in sorted((x for x in days if x < today), reverse=True)[:7]:
+        for d in (today - timedelta(days=k) for k in range(1, 8)):
             body = self.history.get("day", d.isoformat())
             hours = body.get("kwh") or []
             if len(hours) < 23:
@@ -277,10 +304,12 @@ class Billing:
         complete = [daily[d] for d in sorted(daily) if d < today]
         recent = complete[-7:]
         per_day = (sum(recent) / len(recent)) if recent else (so_far / elapsed if elapsed > 0 else 0.0)
-        projected = so_far + per_day * max(0.0, days - elapsed)
+        # past days Sense has no number for still used power: fill them at the recent rate
+        missing = [start + timedelta(days=k) for k in range((today - start).days) if start + timedelta(days=k) not in daily]
+        projected = so_far + per_day * len(missing) + per_day * max(0.0, days - elapsed)
 
         tou_plan = PLANS["cmp-a-tou"]["tou"]
-        share, share_days = self._on_peak_share(tou_plan, list(daily), today)
+        share, share_days = self._on_peak_share(tou_plan, today)
         factor = self.calibration() if s["calibrate"] else None
 
         def bill(kwh, plan_id=None):
@@ -294,6 +323,7 @@ class Billing:
             return b
 
         current = bill(projected)
+        self._last = {"kwh": projected, "share": share}      # rates() prices live usage at this bill's position
         compare = []
         for pid in ("cmp-a", "cmp-a-tou", "cmp-et"):
             b = bill(projected, pid)
@@ -304,6 +334,7 @@ class Billing:
             "start": start.isoformat(), "end": end.isoformat(), "days": days, "elapsed_days": round(elapsed, 2),
             "daily": [{"date": d.isoformat(), "kwh": round(daily[d], 3)} for d in sorted(daily)],
             "kwh_so_far": round(so_far, 2), "kwh_per_day": round(per_day, 2), "kwh_projected": round(projected, 1),
+            "missing_days": [d.isoformat() for d in missing],
             "so_far": bill(so_far) if so_far else None,
             "projected": current,
             "compare": compare,
@@ -314,12 +345,29 @@ class Billing:
         }
 
     def rates(self) -> dict:
-        """What one more kWh costs now (marginal) and the fixed charge per day, for live cost readouts."""
+        """What one more kWh costs at this cycle's projected usage (from the last cycle() call; 1,000 kWh
+        until there is one), and the fixed charge per day, for live cost readouts."""
         s = self.settings()
         p = plan_for(s)
-        typical = estimate(s, 1000, 150 if p["tou"] else None)   # tax applies at typical usage above the exemption
-        return {"marginal_cents_per_kwh": typical["marginal_cents_per_kwh"], "fixed_per_day": round(p["fixed"] / 30.44, 3),
-                "plan": p["id"], "plan_label": p["label"]}
+        last = getattr(self, "_last", None) or {"kwh": 1000.0, "share": None}
+        share = last["share"] if last["share"] is not None else 0.15
+        e = estimate(s, last["kwh"], last["kwh"] * share if p["tou"] else None)
+        out = {"marginal_cents_per_kwh": e["marginal_cents_per_kwh"], "fixed_per_day": round(p["fixed"] / 30.44, 3),
+               "plan": p["id"], "plan_label": p["label"], "at_kwh": round(last["kwh"], 1)}
+        if p["tou"]:
+            out.update(marginal_on_cents=e["marginal_on_cents"], marginal_off_cents=e["marginal_off_cents"], tou=p["tou"])
+        return out
+
+    def price_today(self, kwh: float, hourly_w: list, day: date) -> tuple[float, dict]:
+        """Energy cost of today's kWh: time-of-use splits it by hour (from the hourly averages), flat plans
+        use the one marginal rate."""
+        r = self.rates()
+        if not r.get("tou"):
+            return kwh * r["marginal_cents_per_kwh"] / 100, r
+        weights = [(h, w) for h, w in enumerate(hourly_w or []) if w]
+        total = sum(w for _, w in weights)
+        on = sum(w for h, w in weights if is_on_peak(datetime(day.year, day.month, day.day, h), r["tou"])) / total if total else 0.0
+        return kwh * (on * r["marginal_on_cents"] + (1 - on) * r["marginal_off_cents"]) / 100, r
 
 
 def _num(v) -> bool:
