@@ -89,7 +89,7 @@ export function BillView() {
         </div>
       )}
 
-      {c && (
+      {c && !b.insights?.plans_12mo && (
         <section style={card} aria-label="Rate plans">
           <div style={kicker}>Your usage on each rate plan</div>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : `repeat(${c.compare.length}, minmax(0, 1fr))`, gap: 10 }}>
@@ -191,13 +191,15 @@ function Bills({ b }) {
     <section style={card} aria-label="Your bills">
       <div style={kicker}>Your bills</div>
       <p style={small}>Enter a few real bills to see how close the estimate is. With "match my bills" on, projections are scaled by the average difference.</p>
-      {b.bills.map(x => (
+      {b.bills.map(x => ({ ...x, own: b.insights?.bills?.find(i => i.start === x.start && i.end === x.end)?.check })).map(x => (
         <div key={x.id} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 10, alignItems: 'center', fontFamily: MONO, fontSize: 12,
           borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
           <span style={{ color: C.body }}>{fmtDate(x.start)} → {fmtDate(x.end)} · {fmtInt(x.kwh)} kWh</span>
-          <span style={{ color: C.bright }}>{usd(x.amount)} {x.estimate == null
-            ? <span style={{ color: C.dim }}>(add its on-peak kWh to compare)</span>
-            : <span style={{ color: Math.abs(x.ratio - 1) < 0.05 ? C.green : C.amber }}>(est. {usd(x.estimate)}, {x.diff >= 0 ? '+' : ''}{usd(x.diff)})</span>}</span>
+          <span style={{ color: C.bright }}>{usd(x.amount)} {x.own
+            ? <span style={{ color: Math.abs(x.own.diff) <= 0.05 ? C.green : C.amber }} title="Recomputed from the rates printed on this bill">(model {usd(x.own.model_total)}{Math.abs(x.own.diff) <= 0.05 ? ' ✓' : `, ${x.own.diff >= 0 ? '+' : ''}${usd(x.own.diff)}`})</span>
+            : x.estimate == null
+              ? <span style={{ color: C.dim }}>(add its on-peak kWh to compare)</span>
+              : <span style={{ color: Math.abs(x.ratio - 1) < 0.05 ? C.green : C.amber }} title="Estimated with today's tariff">(est. {usd(x.estimate)}, {x.diff >= 0 ? '+' : ''}{usd(x.diff)})</span>}</span>
           <button type="button" aria-label={`Remove bill ${x.start}`} onClick={() => b.removeBill(x.id).catch(e => toast(e.message))}
             style={{ width: 32, height: 32, borderRadius: 8, cursor: 'pointer', background: 'transparent', color: C.dim, border: `1px solid ${C.line2}` }}>×</button>
         </div>
