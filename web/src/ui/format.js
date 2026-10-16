@@ -15,7 +15,7 @@ export const fmtMoney = d => (d == null ? '—' : `$${d.toFixed(2)}`)
 
 export function fmtClock(ts, { seconds = true } = {}) {
   return new Date(ts * 1000).toLocaleTimeString('en-US', {
-    hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), hour12: false,
+    hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), hourCycle: 'h23',
   })
 }
 

@@ -10,7 +10,7 @@ const STEPS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600]
 export function ticksFor(span, start, end) {
   const step = STEPS.find(s => span / s <= 8) ?? 21600
   const out = []
-  const label = d => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
+  const label = d => d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
   if (step >= 3600) {
     const h = step / 3600
     const d = new Date(start * 1000)
