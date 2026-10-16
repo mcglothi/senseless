@@ -1,7 +1,7 @@
 <!-- HERO IMAGE: docs/hero.png (pending) -->
 # Senseless
 
-A local-first companion for the Sense home energy monitor, for hardware hackers and AI hobbyists who already own one. Sense's consumer app has stalled, but the monitor is still a great sensor. Senseless puts its data and load detection in your hands: collect the feed into SQLite, inspect power changes on each leg, name recurring loads, and build your own tools on top. Storage, detection, and the web UI run on your machine. The live feed and historical backfill still use Sense's cloud; this is not yet a cloud-independent replacement.
+A local-first companion for the Sense home energy monitor, for hardware hackers and AI hobbyists who already own one. Sense's consumer app has stalled, but the monitor is still a great sensor. Senseless puts its data and load detection in your hands: collect the feed into SQLite, inspect power changes on each leg, name recurring loads, and build your own tools on top. Storage, detection, and the web UI run on your machine. It also prices your usage the way your utility actually bills it, imports your utility's bills and meter data to check itself, and maps every device onto a plan of your property. The live feed and historical backfill still use Sense's cloud; this is not yet a cloud-independent replacement.
 
 ## What it does
 
@@ -21,8 +21,8 @@ The local detector pairs on/off steps into runs and groups recurring patterns by
 
 When runs line up with Sense's own device turn-ons, **Sense naming hints** offer a one-tap suggestion. These are correlations for you to confirm, not verified labels. Detection recomputes every minute over the last 48 hours. It uses rules, not a trained AI model; the stored data is there for your own experiments.
 
-![Loads view with unnamed patterns and named loads](docs/screenshots/loads.jpg)
-*Review recurring patterns, accept a hint, or give a load your own name.*
+![Loads view with a named washer cycle, the inbox, and named loads](docs/screenshots/loads.jpg)
+*A washer program detected as one cycle, the inbox of patterns to name, and named loads.*
 
 ### Timeline
 
@@ -228,19 +228,32 @@ Metrics include feed health and age, total and per-leg watts, voltage, frequency
 - [Notes index](notes/README.md): protocol and research entry point.
 - [Realtime feed](notes/realtime-feed.md): message types, per-leg data, deltas, and frame timing.
 - [Load detection](notes/detection.md): rules, naming hints, worked microwave example, and limits.
-- [Senseless HTTP API](notes/senseless-api.md): JSON routes, SSE, settings, and write checks.
-- [Floor plans](notes/floorplan-spec.md): Map view design decisions, data model, API, and upload security.
+- [Senseless HTTP API](notes/senseless-api.md): JSON routes, SSE, settings, and write checks. `GET /api` lists every endpoint, so a script or a voice assistant can find its way around (Device Hunt is built to be driven by voice).
+- [Floor plans](notes/floorplan-spec.md) and [property map](notes/property-spec.md): buildings, floors, rooms, markers, API, and upload security.
+- [Utilities and tariffs](notes/energy-providers.md): importers (Green Button, Smart Meter Texas, CSV mappings, bill plugins), tariff packs, and how to add yours.
+- [Appliance cycles](notes/cycles.md): how washer- and dishwasher-style programs are detected as one event.
 - [Sense cloud API](notes/api.md): authentication and endpoint inventory.
 - [Findings](notes/findings.md) and [methodology](notes/methodology.md): hardware observations and how to reproduce the research.
 - [Open questions](notes/open-questions.md) and [changelog](CHANGELOG.md): remaining work and shipped features.
 
 ## Roadmap
 
-The next detection work is closing runs with multi-step offs and improving matches when one appliance produces several patterns. Other open directions are decomposing Always On and Other, validating against smart plugs or circuit CTs, and investigating finer history, feed limits, and unexplained protocol fields. Longer term: understand the monitor's LAN behavior and whether collection can survive without Sense's cloud. These are research questions, not promised features.
+In progress: **motor loads.** Pumps and compressors draw a start-up surge, so their switch-on looks bigger than their switch-off and the two never pair. Sizing a run by the power it settles at, and letting one switch-off close two loads on the same timer (a pool pump and its salt cell), turns them into real runs with runtime and cost.
+
+Next, roughly in order:
+
+- More utilities: Texas plans from their Electricity Facts Label (energy charge, base charge, TDU delivery, usage credits), tariff import from OpenEI's Utility Rate Database, and community tariff packs.
+- Verify the Smart Meter Texas and Green Button CSV importers against real exports (they follow the published formats; samples welcome).
+- Better identification: one appliance that shows up as several patterns, decomposing Always On and Other, and checking against smart plugs or circuit CTs.
+- Research: finer history, feed limits, unexplained protocol fields, and whether the monitor's LAN behaviour allows collection without Sense's cloud.
+
+These are directions, not promises.
 
 ## Contributing
 
-Labeled captures are the most useful contribution. Run a known appliance at a recorded time, note its mode and duration, and include the startup and shutdown. Small loads, multi-stage appliances, and partial shutdowns are especially useful for testing detection. See [samples/](samples/) and the [microwave findings](notes/findings.md) for an example.
+**Tariff packs and importers** are the easiest way to make Senseless work where you live: a tariff pack is a small JSON file describing your utility's plans (see [Utilities and tariffs](notes/energy-providers.md)), and a real usage export from your utility (Smart Meter Texas, a Green Button file) with personal columns removed lets us verify or add an importer.
+
+Labeled captures are the other most useful contribution. Run a known appliance at a recorded time, note its mode and duration, and include the startup and shutdown. Small loads, multi-stage appliances, and partial shutdowns are especially useful for testing detection. See [samples/](samples/) and the [microwave findings](notes/findings.md) for an example.
 
 Sanitize first, inspect the output, and search for real account identifiers before sharing. Report whether a finding is verified against traffic or inferred from client behavior. Keep decompiled Sense source out of this repo; describe observed behavior in notes instead.
 
