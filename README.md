@@ -39,6 +39,15 @@ Take your phone to the panel. Capture a baseline, switch off one breaker, and se
 
 *Live leg readings and a guided baseline → breaker → save flow.*
 
+### Map
+
+Upload a floor plan (a blueprint, a phone photo of a sketch, or a screenshot from any floor-plan app) and put your devices where they live. Each marker is tied to a named load or a live Sense device and lights up when it runs: dim when off, glowing with its watts when on, and a warm aura above 1 kW. Draw rooms to see live watts and today's energy per room, and switch floors to see each floor's live load.
+
+![Map view: a floor plan with live devices and room totals](docs/screenshots/map.jpg)
+*Rooms light up with what is running in them; tap a device for live watts and today's energy.*
+
+Edit mode has a palette to drag from (or tap, then tap the map, on touch screens), drag-to-move with arrow-key nudging, and rooms you draw, move, and resize. Placements are stored relative to the image, so replacing the plan keeps them. There is a list view grouped by room, and a plan style switch (original, dimmed, inverted) for bright blueprints on a dark theme.
+
 ### History
 
 Browse days, months, and years from Sense's cloud history, cached locally. Drill into a month calendar, compare with the previous period, and inspect energy, cost, and Sense's per-device breakdown. This attribution comes from Sense; it is separate from Senseless's local detection.
@@ -157,7 +166,8 @@ Your data directory contains:
 | Path | Contents |
 |---|---|
 | `senseless.db` | Realtime readings, on-board deltas, Sense's device power attribution on change, and other feed events. |
-| `settings.db` | Persistent patterns and names, breaker map, appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
+| `settings.db` | Persistent patterns and names, breaker map, floor plans (floors, rooms, markers), appearance settings, installed themes, and cached Sense history. Runs are recomputed from deltas. |
+| `floorplans/` | Uploaded floor plan images. |
 | `raw/rt-YYYY-MM-DD.jsonl.gz` | Daily compressed archives of every feed message, enabled by default. |
 | `themes-gallery.json` | Cached theme gallery. |
 | `token.json` (Docker default) | Cached authentication session. Source installs keep it outside the data directory by default; see configuration. |
@@ -194,6 +204,7 @@ Metrics include feed health and age, total and per-leg watts, voltage, frequency
 - [Realtime feed](notes/realtime-feed.md): message types, per-leg data, deltas, and frame timing.
 - [Load detection](notes/detection.md): rules, naming hints, worked microwave example, and limits.
 - [Senseless HTTP API](notes/senseless-api.md): JSON routes, SSE, settings, and write checks.
+- [Floor plans](notes/floorplan-spec.md): Map view design decisions, data model, API, and upload security.
 - [Sense cloud API](notes/api.md): authentication and endpoint inventory.
 - [Findings](notes/findings.md) and [methodology](notes/methodology.md): hardware observations and how to reproduce the research.
 - [Open questions](notes/open-questions.md) and [changelog](CHANGELOG.md): remaining work and shipped features.

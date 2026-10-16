@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { fitView, guessIcon, loadsIndex, markerState, rectFrom, rollups, tier, toNormalized, zoomAt } from './floorplan'
 
 const patterns = [
-  { id: 1, name: 'Microwave', running: true, center_w: 2025, wh_today: 40 },
-  { id: 2, name: 'Relay', running: false, center_w: 47, wh_today: 10 },
-  { id: 3, name: 'relay ', running: true, center_w: 56, wh_today: 5 },
+  { id: 1, name: 'Microwave', running: true, center_w: 2025, wh_today: 40, runs_today: 3 },
+  { id: 2, name: 'Relay', running: false, center_w: 47, wh_today: 10, runs_today: 4 },
+  { id: 3, name: 'relay ', running: true, center_w: 56, wh_today: 5, runs_today: 2 },
   { id: 4, legs: 'L1', center_w: 90 },
 ]
 
@@ -12,7 +12,7 @@ describe('floor plan state', () => {
   it('derives marker state from named loads and Sense devices', () => {
     const ctx = { loadsByName: loadsIndex(patterns), senseDevices: [{ id: 'abc', name: 'Fridge', w: 140 }] }
     expect(markerState({ kind: 'load', ref: 'microwave' }, ctx)).toMatchObject({ known: true, on: true, w: 2025, whToday: 40 })
-    expect(markerState({ kind: 'load', ref: 'Relay' }, ctx)).toMatchObject({ on: true, w: 56, whToday: 15 })   // grouped by name
+    expect(markerState({ kind: 'load', ref: 'Relay' }, ctx)).toMatchObject({ on: true, w: 56, whToday: 15, runsToday: 6 })   // grouped by name
     expect(markerState({ kind: 'load', ref: 'Kettle' }, ctx)).toMatchObject({ known: false, on: false })
     expect(markerState({ kind: 'sense', ref: 'abc' }, ctx)).toMatchObject({ on: true, w: 140 })
     expect(markerState({ kind: 'sense', ref: 'gone' }, ctx)).toMatchObject({ on: false, w: 0 })

@@ -8,10 +8,31 @@ import { DRAG_TYPE, fmtWatts, fmtWh } from './MapCanvas'
 
 const sectionLabel = { fontFamily: MONO, fontSize: 9, color: C.dim, letterSpacing: 1.5, textTransform: 'uppercase', margin: '14px 0 6px' }
 
+// Module scope, not inside Palette: a component defined per render remounts (and drops focus) on every live update.
+function PaletteItem({ it, placed, armed, onArm, onPlaceNow }) {
+  const { accent } = useTheme()
+  return (
+    <div draggable onDragStart={e => { e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(it)); e.dataTransfer.effectAllowed = 'copy' }}
+      onClick={() => onArm(armed ? null : it)} role="button" tabIndex={0}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onPlaceNow(it) } }}
+      aria-label={`${it.title}${placed ? ' (placed)' : ''}: Enter places it at the centre of the map`}
+      style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '7px 9px', borderRadius: 8, cursor: 'grab',
+        border: `1px solid ${armed ? accent : C.line}`, background: armed ? alpha(accent, '18') : C.panel, opacity: placed ? 0.6 : 1 }}>
+      <Icon name={it.icon} size={16} color={armed ? accent : C.muted} />
+      <span style={{ flex: 1, fontFamily: MONO, fontSize: 12, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>
+      {placed && <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>placed</span>}
+    </div>
+  )
+}
+
 // Edit mode, nothing selected: everything you can put on the map. Drag an item onto the floor, or
 // click it and then click the map (the only way on touch screens).
-export function Palette({ loadNames, senseDevices, placedRefs, placing, onArm }) {
+export function Palette({ loadNames, senseDevices, placedRefs, placing, onArm, onPlaceNow }) {
   const { accent } = useTheme()
+  const item = (it, key) => {
+    const armed = !!placing && placing.kind === it.kind && placing.ref === it.ref
+    return <PaletteItem key={key} it={it} placed={it.kind !== 'label' && placedRefs.has(`${it.kind}:${it.ref}`)} armed={armed} onArm={onArm} onPlaceNow={onPlaceNow} />
+  }
   const [q, setQ] = useState('')
   const match = s => s.toLowerCase().includes(q.trim().toLowerCase())
   const items = useMemo(() => [
@@ -22,42 +43,26 @@ export function Palette({ loadNames, senseDevices, placedRefs, placing, onArm })
   // unplaced first, then alphabetical
   visible.sort((a, b) => (placedRefs.has(`${a.kind}:${a.ref}`) - placedRefs.has(`${b.kind}:${b.ref}`)) || a.title.localeCompare(b.title))
 
-  const Item = ({ it }) => {
-    const placed = placedRefs.has(`${it.kind}:${it.ref}`)
-    const armed = placing && placing.kind === it.kind && placing.ref === it.ref
-    return (
-      <div draggable onDragStart={e => { e.dataTransfer.setData(DRAG_TYPE, JSON.stringify(it)); e.dataTransfer.effectAllowed = 'copy' }}
-        onClick={() => onArm(armed ? null : it)} role="button" tabIndex={0}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onArm(armed ? null : it) } }}
-        style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '7px 9px', borderRadius: 8, cursor: 'grab',
-          border: `1px solid ${armed ? accent : C.line}`, background: armed ? alpha(accent, '18') : C.panel, opacity: placed ? 0.6 : 1 }}>
-        <Icon name={it.icon} size={16} color={armed ? accent : C.muted} />
-        <span style={{ flex: 1, fontFamily: MONO, fontSize: 12, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>
-        {placed && <span style={{ fontFamily: MONO, fontSize: 9, color: C.dim }}>placed</span>}
-      </div>
-    )
-  }
-
   const loads = visible.filter(i => i.kind === 'load'), sense = visible.filter(i => i.kind === 'sense')
   return (
     <div>
       <div style={{ fontFamily: MONO, fontSize: 11, color: C.muted, lineHeight: 1.6, marginBottom: 10 }}>
-        Drag a device onto the floor, or tap it and then tap the map.
+        Drag a device onto the floor, or tap it and then tap the map. With a keyboard, Enter drops it in the middle of the view; then use the arrow keys.
       </div>
       <TextInput value={q} onChange={e => setQ(e.target.value)} placeholder="Filter devices…" aria-label="Filter devices" />
       <div style={sectionLabel}>Your named loads</div>
       <div style={{ display: 'grid', gap: 5 }}>
-        {loads.map(it => <Item key={`l${it.ref}`} it={it} />)}
+        {loads.map(it => item(it, `l${it.ref}`))}
         {!loads.length && <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, lineHeight: 1.5 }}>
           {q ? 'No match.' : <>Name loads in <a href="/loads" onClick={link('/loads')} style={{ color: accent }}>Loads</a> to place them here.</>}
         </div>}
       </div>
       {sense.length > 0 && <>
         <div style={sectionLabel}>Sense devices (live)</div>
-        <div style={{ display: 'grid', gap: 5 }}>{sense.map(it => <Item key={`s${it.ref}`} it={it} />)}</div>
+        <div style={{ display: 'grid', gap: 5 }}>{sense.map(it => item(it, `s${it.ref}`))}</div>
       </>}
       <div style={sectionLabel}>Other</div>
-      <Item it={{ kind: 'label', ref: null, label: 'Label', icon: null, title: 'Text label (panel, router…)' }} />
+      {item({ kind: 'label', ref: null, label: 'Label', icon: null, title: 'Text label (panel, router…)' }, 'label')}
     </div>
   )
 }
@@ -122,6 +127,7 @@ export function MarkerInspector({ m, name, state, room, edit, loadNames, senseDe
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, padding: '12px 14px', borderRadius: 10, background: C.field, border: `1px solid ${C.line}` }}>
           <Stat label="Now" value={state.on ? `${state.estimated ? '≈ ' : ''}${fmtWatts(state.w)}` : state.known ? 'Off' : '—'} color={state.on ? color : C.dim} />
           <Stat label="Today" value={fmtWh(state.whToday)} />
+          {m.kind === 'load' && state.known && <Stat label="Runs today" value={state.runsToday ?? 0} />}
           {!state.known && <div style={{ gridColumn: '1 / -1', fontFamily: MONO, fontSize: 11, color: C.dim, lineHeight: 1.5 }}>
             No detected load is named “{m.ref}” right now. It lights up once a pattern with that name runs.</div>}
           {state.estimated && state.known && <div style={{ gridColumn: '1 / -1', fontFamily: MONO, fontSize: 10, color: C.dim, lineHeight: 1.5 }}>

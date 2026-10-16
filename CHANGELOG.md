@@ -2,6 +2,24 @@
 
 All notable changes, newest first. Versions are git tags; images are `ghcr.io/mcglothi/senseless:<version>`.
 
+## 0.6.0 (2026-10-16)
+
+### Added
+- **Map** (`/map`): upload a floor plan per floor, place named loads and live Sense devices on it, draw
+  rooms. Devices show calm live states (off, on with watts, ≥ 1 kW aura); rooms and floors roll up live
+  watts and today's energy. Edit mode with drag-and-drop or tap-to-place palette, marker drag and
+  keyboard nudge, room draw/move/resize; inspector panel (bottom sheet on phones); list view; plan style
+  (original/dimmed/inverted). Placements are relative to the image, so replacing it keeps them.
+- Floor plan API: `/api/floors`, rooms, markers, and raw-body image upload (PNG/JPEG/WebP, magic bytes
+  checked, 15 MB, 12000 px, custom-header + Origin check).
+
+### Changed
+- Load detection: linear-time run pairing; Sense hint assignment uses each turn-on once, nearest run first.
+
+### Fixed
+- A stray `">` no longer renders at the top of every page.
+- Dark Reader no longer re-colours the app on top of its own themes.
+
 ## 0.5.0 (2026-10-16)
 
 ### Added

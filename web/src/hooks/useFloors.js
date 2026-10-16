@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api/api'
 import { toast } from '../ui/primitives'
 
@@ -22,18 +22,30 @@ async function putImage(id, file) {
 export function useFloors() {
   const [floors, setFloors] = useState(null)
   const [error, setError] = useState(null)
-  const load = useCallback(() => api('GET', '/api/floors').then(f => { setFloors(f); setError(null) }).catch(e => setError(e.message)), [])
+  // A reload only lands if it is the newest one and no write is still in flight; otherwise an older
+  // GET could arrive late and put a just-dragged marker back where it was.
+  const seq = useRef(0), pending = useRef(0)
+  const load = useCallback(async () => {
+    const mine = ++seq.current
+    try {
+      const f = await api('GET', '/api/floors')
+      if (mine === seq.current && pending.current === 0) { setFloors(f); setError(null) }
+    } catch (e) {
+      if (mine === seq.current) setError(e.message)
+    }
+  }, [])
   useEffect(() => { load() }, [load])
 
   const run = useCallback(async fn => {
+    pending.current++
     try {
-      const r = await fn()
-      await load()
-      return r
+      return await fn()
     } catch (e) {
       toast(e.message)
-      await load()
       throw e
+    } finally {
+      pending.current--
+      if (pending.current === 0) await load()   // callers rely on the list being fresh when this resolves
     }
   }, [load])
 

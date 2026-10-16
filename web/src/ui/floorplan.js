@@ -8,7 +8,7 @@ export function markerState(m, { loadsByName, senseDevices }) {
   if (m.kind === 'load') {
     const g = loadsByName.get((m.ref ?? '').trim().toLowerCase())
     if (!g) return { known: false, on: false, w: 0, whToday: null }
-    return { known: true, on: !!g.running, w: g.running ? Math.round(g.center_w) : 0, whToday: g.wh_today ?? null, estimated: true }
+    return { known: true, on: !!g.running, w: g.running ? Math.round(g.center_w) : 0, whToday: g.wh_today ?? null, runsToday: g.runs_today, estimated: true }
   }
   if (m.kind === 'sense') {
     const d = senseDevices.find(x => String(x.id) === String(m.ref))
@@ -25,11 +25,12 @@ export function loadsIndex(patterns) {
     if (!p.name) continue
     const k = p.name.trim().toLowerCase()
     const g = idx.get(k)
-    if (!g) idx.set(k, { name: p.name, running: !!p.running, center_w: p.running ? p.center_w : 0, wh_today: p.wh_today ?? 0, legs: p.legs })
+    if (!g) idx.set(k, { name: p.name, running: !!p.running, center_w: p.running ? p.center_w : 0, wh_today: p.wh_today ?? 0, runs_today: p.runs_today ?? 0, legs: p.legs })
     else {
       g.running = g.running || !!p.running
       if (p.running) g.center_w += p.center_w
       g.wh_today += p.wh_today ?? 0
+      g.runs_today += p.runs_today ?? 0
     }
   }
   // a group that's off still needs a size for "≈ W when on" in the inspector

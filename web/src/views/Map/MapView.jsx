@@ -25,6 +25,7 @@ export function MapView({ live, loads, light }) {
   const [tool, setTool] = useState('select')         // select | room
   const [placing, setPlacing] = useState(null)       // palette item armed for tap-to-place
   const [selected, setSelected] = useState(null)     // {type: 'marker'|'room', id}
+  const canvasApi = useRef(null)
   const [listView, setListView] = useState(() => lsGet('senseless.map.list') === '1')
 
   const floors = fp.floors ?? []
@@ -105,7 +106,8 @@ export function MapView({ live, loads, light }) {
   } else if (edit) {
     panel = (
       <>
-        <Palette loadNames={loadNames} senseDevices={senseDevices} placedRefs={placedRefs} placing={placing} onArm={setPlacing} />
+        <Palette loadNames={loadNames} senseDevices={senseDevices} placedRefs={placedRefs} placing={placing} onArm={setPlacing}
+          onPlaceNow={it => { const c = canvasApi.current?.center(); if (c) onPlace(c, it) }} />
         <div style={{ height: 1, background: C.line, margin: '18px 0 14px' }} />
         <FloorSettings floor={floor} count={floor.rooms.length + floor.markers.length}
           onRename={name => fp.patchFloor(floor.id, { name }).catch(() => {})} onReplaceImage={upload}
@@ -117,7 +119,7 @@ export function MapView({ live, loads, light }) {
   const canvas = (
     <MapCanvas floor={floor} rollup={roll} stateOf={stateOf} nameOf={nameOf} edit={edit} tool={tool} placing={placing}
       selected={selected} onSelect={setSelected} onPlace={onPlace} onMoveMarker={onMoveMarker} onDeleteMarker={onDeleteMarker}
-      onDrawRoom={onDrawRoom} onPatchRoom={onPatchRoom} onDropFile={edit ? upload : null} height={height} planStyle={planStyle} onCyclePlan={cyclePlan}>
+      onDrawRoom={onDrawRoom} onPatchRoom={onPatchRoom} onDropFile={edit ? upload : null} height={height} planStyle={planStyle} onCyclePlan={cyclePlan} apiRef={canvasApi}>
       {edit && <EditBar tool={tool} setTool={setTool} placing={placing} onCancelPlace={() => setPlacing(null)} />}
       {!floor.image_url && !floor.markers.length && !floor.rooms.length && <UploadPrompt edit={edit} onFile={upload} onEdit={() => setEdit(true)} />}
       {!edit && floor.markers.length > 0 && <Legend />}
@@ -144,7 +146,7 @@ export function MapView({ live, loads, light }) {
       </div>
 
       {listView
-        ? <ListView floors={floors} stateOf={stateOf} nameOf={nameOf} onPick={(f, m) => { setFloorId(f.id); setListView(false); setTimeout(() => setSelected({ type: 'marker', id: m.id }), 0) }} />
+        ? <ListView floors={floors} stateOf={stateOf} nameOf={nameOf} onPick={(f, sel) => { setFloorId(f.id); setListView(false); setTimeout(() => setSelected(sel), 0) }} />
         : isMobile
           ? <>
               {canvas}
@@ -285,16 +287,16 @@ function ListView({ floors, stateOf, nameOf, onPick }) {
                 return (
                   <div key={room.id}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: MONO, fontSize: 10, letterSpacing: 1.5, textTransform: 'uppercase', color: C.muted, marginBottom: 4 }}>
-                      <span>{room.name}</span><span style={{ color: r.watts > 0 ? C.bright : C.dim }}>{r.watts > 0 ? fmtWatts(r.watts) : ''}{r.wh > 0 ? ` · ${fmtWh(r.wh)}` : ''}</span>
+                      <button onClick={() => onPick(f, { type: 'room', id: room.id })} style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', font: 'inherit', letterSpacing: 'inherit', textTransform: 'inherit', color: 'inherit' }}>{room.name}</button><span style={{ color: r.watts > 0 ? C.bright : C.dim }}>{r.watts > 0 ? fmtWatts(r.watts) : ''}{r.wh > 0 ? ` · ${fmtWh(r.wh)}` : ''}</span>
                     </div>
-                    <DeviceList devices={markers} nameOf={nameOf} stateOf={stateOf} onPick={m => onPick(f, m)} />
+                    <DeviceList devices={markers} nameOf={nameOf} stateOf={stateOf} onPick={m => onPick(f, { type: 'marker', id: m.id })} />
                   </div>
                 )
               })}
               {rest.length > 0 && (
                 <div>
                   <div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: 1.5, textTransform: 'uppercase', color: C.dim, marginBottom: 4 }}>Not in a room</div>
-                  <DeviceList devices={rest} nameOf={nameOf} stateOf={stateOf} onPick={m => onPick(f, m)} />
+                  <DeviceList devices={rest} nameOf={nameOf} stateOf={stateOf} onPick={m => onPick(f, { type: 'marker', id: m.id })} />
                 </div>
               )}
               {!groups.length && !rest.length && <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>Nothing placed on this floor yet.</div>}
