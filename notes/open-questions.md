@@ -57,7 +57,12 @@ still depends on Sense's servers. Long-term questions:
       processor** (an application processor, so almost certainly embedded Linux). Forum posts say early monitors
       used a TI ADC/DSP and newer ones NXP parts. No FCC filing to mine: Sense Labs (grantee 2AFZS) has no
       indexed device filings, so the monitor likely uses a pre-certified Wi-Fi module (the label's
-      "Contains FCC ID" line would name it). Note: FCC ID 2ABAMSNSE "Sense" is Hello Inc.'s sleep tracker,
+      "Contains FCC ID" line would name it). **2017 teardown** (Tisham Dhar, whatnicklife.blogspot.com/2017/12/sense-energy-monitor-teardown-sampling.html):
+      TI **AM3352** (BeagleBone-class; BBB's PMIC), two 14-bit 2 MSPS TI ADCs, Altera MAX V CPLD doing the
+      sampling/MAC, stacked digital + power boards, clip-together case, Molex Micro-Fit (voltage) / Nano-Fit (CT)
+      inputs. If units still use a GP (non-secure) AM335x, its boot ROM can boot from SD/USB/UART per SYSBOOT
+      straps, i.e. an owner could run their own Linux. Newer units may be NXP-based; check the board revision.
+      Note: FCC ID 2ABAMSNSE "Sense" is Hello Inc.'s sleep tracker,
       not this monitor. ⚠️ The monitor lives in the breaker panel. De-energize and know what you're doing.
 - [ ] Sense is pivoting to utility smart meters. What happens to consumer monitors if the cloud goes away?
 
